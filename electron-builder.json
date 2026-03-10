@@ -1,0 +1,55 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.ebay.title-generator",
+  "productName": "eBay Title Generator",
+  "copyright": "Copyright © 2024",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "out/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "database",
+      "to": "database",
+      "filter": ["**/*"]
+    }
+  ],
+  "asar": true,
+  "asarUnpack": [
+    "node_modules/better-sqlite3/**/*"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "${productName}-Portable-${version}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "eBay Title Generator",
+    "uninstallDisplayName": "eBay Title Generator",
+    "deleteAppDataOnUninstall": true,
+    "runAfterFinish": true
+  },
+  "portable": {},
+  "mac": {
+    "target": ["dmg"],
+    "category": "public.app-category.business",
+    "artifactName": "${productName}-${version}.${ext}"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "category": "Office",
+    "artifactName": "${productName}-${version}.${ext}"
+  }
+}
