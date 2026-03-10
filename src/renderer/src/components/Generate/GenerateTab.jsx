@@ -40,6 +40,38 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
     }
   };
 
+  const handleExportGenerated = () => {
+    if (!generatedWithExtraction.length) {
+      message.warning('No generated data to export');
+      return;
+    }
+
+    const columns = [
+      'item_number', 'sku', 'variation_number', 'old_title', 'new_title',
+      'category', 'brand', 'printer_brand', 'kompatibel', 'cartridge_models',
+      'printer_models', 'set_of', 'qty', 'color', 'extra',
+      'verification_status', 'verification_confidence', 'verification_issues'
+    ];
+
+    const escape = (val) => {
+      const s = String(val ?? '').replace(/"/g, '""');
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s}"` : s;
+    };
+
+    const header = columns.join(',');
+    const rows = generatedWithExtraction.map((row) => columns.map((col) => escape(row[col])).join(','));
+    const csv = [header, ...rows].join('\n');
+
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `generated_titles_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    message.success(`Exported ${generatedWithExtraction.length} rows`);
+  };
+
   const handleExportExtracted = () => {
     if (!extractedRows.length) {
       message.warning('No extracted data to export');
@@ -320,7 +352,22 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <Card title="Generated Titles + Extraction" variant="outlined">
+        <Card
+          title={
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Generated Titles + Extraction ({generatedWithExtraction.length})</span>
+              <Button
+                size="small"
+                icon={<DownloadOutlined />}
+                disabled={!generatedWithExtraction.length}
+                onClick={handleExportGenerated}
+              >
+                Export CSV
+              </Button>
+            </div>
+          }
+          variant="outlined"
+        >
           {generatedWithExtraction.length ? (
             <Table
               size="small"
