@@ -33,6 +33,20 @@ const SQLITE_TABLE_LABELS = {
   users: 'Users'
 };
 
+const MYSQL_TABLE_LABELS = {
+  app_products: 'Products',
+  app_generated_titles: 'Generated Titles',
+  app_title_history: 'Title History',
+  app_title_knowledge_base: 'Knowledge Base',
+  app_settings: 'App Settings',
+  app_logs: 'App Logs',
+  app_extracted_elements: 'Extracted Elements',
+  app_sku_import_counts: 'Import Counts',
+  app_price_history: 'Price History',
+  app_csv_exports: 'CSV Exports',
+  app_users: 'Users'
+};
+
 function formatCellValue(value, colName) {
   if (value === null || value === undefined) {
     return (
@@ -164,8 +178,10 @@ export default function DBViewerTab({ isAdmin }) {
     }
   };
 
-  const tableLabel = (name) =>
-    dbSource === 'sqlite' ? SQLITE_TABLE_LABELS[name] || name : name;
+  const tableLabel = (name) => {
+    if (dbSource === 'sqlite') return SQLITE_TABLE_LABELS[name] || name;
+    return MYSQL_TABLE_LABELS[name] || name;
+  };
 
   const canDelete =
     isAdmin &&

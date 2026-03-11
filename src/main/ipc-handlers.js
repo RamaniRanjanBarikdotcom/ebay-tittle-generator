@@ -247,6 +247,39 @@ export function registerIpcHandlers(mainWindow) {
     ).run(key, String(value), type);
   };
 
+  const ensurePrimaryAppDbSetting = (db) => {
+    const current = getSettingValue(db, 'app_db_primary', '');
+    if (!current) {
+      setSettingValue(db, 'app_db_primary', 'mysql', 'string');
+      return 'mysql';
+    }
+    return current === 'sqlite' ? 'sqlite' : 'mysql';
+  };
+
+  const getAppDbPrimaryMode = () => {
+    try {
+      const db = DatabaseManager.getDatabase();
+      return ensurePrimaryAppDbSetting(db);
+    } catch {
+      return 'mysql';
+    }
+  };
+
+  const getActiveAppDbProfile = () => {
+    try {
+      return AppSqlStore.getActiveProfile();
+    } catch {
+      return null;
+    }
+  };
+
+  const isPrimaryMysqlActive = () => {
+    const profile = getActiveAppDbProfile();
+    if (!profile) return false;
+    if (getAppDbPrimaryMode() !== 'mysql') return false;
+    return AppSqlStore.getDbType(profile) === 'mysql';
+  };
+
   const logEvent = (db, { level = 'info', event, message, details = null, sessionId = null }) => {
     db.prepare(
       `INSERT INTO app_logs (level, event, message, details, session_id)
@@ -325,13 +358,29 @@ export function registerIpcHandlers(mainWindow) {
   };
 
   let remoteRestorePromise = null;
+  let remoteRestoreTimer = null;
   const queueRemoteRestore = (options = {}) => {
     if (remoteRestorePromise) return remoteRestorePromise;
     remoteRestorePromise = (async () => {
       try {
-        const result = await AppSqlStore.restoreFromRemote(options);
+        const db = DatabaseManager.getDatabase();
+        const primaryMode = ensurePrimaryAppDbSetting(db);
+        const profile = getActiveAppDbProfile();
+        const isPrimaryMysql = primaryMode === 'mysql' && profile && AppSqlStore.getDbType(profile) === 'mysql';
+        const force = Boolean(options?.force) || isPrimaryMysql;
+        const result = await AppSqlStore.restoreFromRemote({ ...options, force });
         if (result?.synced) {
           console.log('[AppSqlSync] Restored local data from App DB', result.counts || {});
+        } else if (isPrimaryMysql && result?.reason === 'No remote app data found') {
+          const pushed = queueAllLocalSessionsSync();
+          try {
+            await AppSqlStore.syncKnowledgeBase();
+          } catch (error) {
+            console.error('[AppSqlSync] Knowledge base sync failed:', error.message);
+          }
+          if (pushed) {
+            console.log('[AppSqlSync] Remote empty; pushed local data to App DB');
+          }
         }
         return result;
       } catch (error) {
@@ -344,8 +393,20 @@ export function registerIpcHandlers(mainWindow) {
     return remoteRestorePromise;
   };
 
+  const scheduleRemoteRestore = () => {
+    if (remoteRestoreTimer) {
+      clearInterval(remoteRestoreTimer);
+      remoteRestoreTimer = null;
+    }
+    if (!isPrimaryMysqlActive()) return;
+    remoteRestoreTimer = setInterval(() => {
+      queueRemoteRestore({ force: true }).catch(() => {});
+    }, 5 * 60 * 1000);
+  };
+
   setTimeout(() => {
     queueRemoteRestore().catch(() => {});
+    scheduleRemoteRestore();
   }, 50);
 
   ipcMain.handle('app:ping', async () => 'pong');
@@ -769,6 +830,7 @@ export function registerIpcHandlers(mainWindow) {
         // If local already has data → push all sessions to MySQL; otherwise pull from MySQL
         const pushed = queueAllLocalSessionsSync();
         if (!pushed) queueRemoteRestore().catch(() => {});
+        scheduleRemoteRestore();
       }
       const responseProfiles = nextProfiles.map((p) => ({ ...p, password: decryptText(p.password || '') }));
       return {
@@ -793,6 +855,7 @@ export function registerIpcHandlers(mainWindow) {
       if (nextActive) {
         const pushed = queueAllLocalSessionsSync();
         if (!pushed) queueRemoteRestore().catch(() => {});
+        scheduleRemoteRestore();
       }
       const responseProfiles = nextProfiles.map((p) => ({ ...p, password: decryptText(p.password || '') }));
       return { success: true, data: { profiles: responseProfiles, activeProfileId: nextActive }, error: null };
@@ -808,6 +871,7 @@ export function registerIpcHandlers(mainWindow) {
       if (payload?.id) {
         const pushed = queueAllLocalSessionsSync();
         if (!pushed) queueRemoteRestore().catch(() => {});
+        scheduleRemoteRestore();
       }
       return { success: true, data: { activeProfileId: payload?.id || '' }, error: null };
     } catch (error) {
@@ -1378,24 +1442,35 @@ export function registerIpcHandlers(mainWindow) {
     if (!filePath) return { success: false, data: null, error: 'No file path provided' };
     try {
       sendProgress({ scope: 'kb-import', percent: 1, message: 'reading Excel' });
+      const primaryMysql = isPrimaryMysqlActive();
       const result = await KnowledgeBaseImporter.importFile(filePath, (progress) => {
         sendProgress({
           scope: 'kb-import',
           percent: progress?.percent ?? 0,
           message: progress?.message || 'saving local DB'
         });
-      });
+      }, { collectEntries: primaryMysql });
       const db = DatabaseManager.getDatabase();
       const sessionId = resolveSessionId(db);
       let remoteSync = { synced: false };
       try {
-        remoteSync = await AppSqlStore.syncKnowledgeBase((progress) => {
-          sendProgress({
-            scope: 'kb-import',
-            percent: progress?.percent ?? 75,
-            message: progress?.message || 'sending to App SQL'
+        if (primaryMysql && Array.isArray(result?.entries)) {
+          remoteSync = await AppSqlStore.replaceKnowledgeBaseEntries(result.entries, (progress) => {
+            sendProgress({
+              scope: 'kb-import',
+              percent: progress?.percent ?? 75,
+              message: progress?.message || 'sending to App SQL'
+            });
           });
-        });
+        } else {
+          remoteSync = await AppSqlStore.syncKnowledgeBase((progress) => {
+            sendProgress({
+              scope: 'kb-import',
+              percent: progress?.percent ?? 75,
+              message: progress?.message || 'sending to App SQL'
+            });
+          });
+        }
       } catch (error) {
         remoteSync = { synced: false, error: error.message };
       }

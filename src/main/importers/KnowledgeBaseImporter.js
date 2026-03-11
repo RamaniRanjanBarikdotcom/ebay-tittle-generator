@@ -43,7 +43,7 @@ function getFirstCell(row, headerMap, candidates) {
 }
 
 export default class KnowledgeBaseImporter {
-  static async importFile(filePath, onProgress) {
+  static async importFile(filePath, onProgress, options = {}) {
     if (!filePath) throw new Error('No file path provided');
     if (onProgress) onProgress({ percent: 2, message: 'reading Excel' });
 
@@ -55,6 +55,8 @@ export default class KnowledgeBaseImporter {
     KnowledgeBaseStore.ensureSchema();
     const headerMap = mapHeaders(sheet.getRow(1));
 
+    const collectEntries = Boolean(options?.collectEntries);
+    const entries = collectEntries ? new Map() : null;
     let total = 0;
     let imported = 0;
     let skipped = 0;
@@ -111,6 +113,10 @@ export default class KnowledgeBaseImporter {
         const ok = KnowledgeBaseStore.upsertEntry(built);
         if (ok) imported += 1;
         else skipped += 1;
+        if (entries) {
+          // De-dupe by normalized title for remote sync (last entry wins)
+          entries.set(built.normalizedTitle, built);
+        }
       } catch (error) {
         errors.push({ row: i, error: error.message });
       }
@@ -126,6 +132,12 @@ export default class KnowledgeBaseImporter {
       }
     }
 
-    return { total, imported, skipped, errors };
+    return {
+      total,
+      imported,
+      skipped,
+      errors,
+      entries: entries ? Array.from(entries.values()) : undefined
+    };
   }
 }

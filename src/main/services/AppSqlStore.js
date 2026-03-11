@@ -158,7 +158,6 @@ export default class AppSqlStore {
       const useSsl = toBool(profile?.encrypt, false);
       const trustServerCertificate = toBool(profile?.trustServerCertificate, true);
       return {
-        dbType,
         host: serverHost || String(profile?.server || '').trim(),
         port: parsePort(port, 3306),
         user: String(profile?.user || ''),
@@ -175,7 +174,6 @@ export default class AppSqlStore {
     }
 
     const config = {
-      dbType,
       server: serverHost || String(profile?.server || '').trim(),
       database: profile?.database,
       connectionTimeout: Number(profile?.connectionTimeoutMs) || 30000,
@@ -217,7 +215,7 @@ export default class AppSqlStore {
     this.validateProfile(profile);
     const config = this.buildConfig(profile);
 
-    if (config.dbType === 'mysql') {
+    if (this.getDbType(profile) === 'mysql') {
       const mysql = await this.loadMysqlModule();
       const conn = await mysql.createConnection(config);
       try {
@@ -663,8 +661,9 @@ export default class AppSqlStore {
 
   static async testConnection(profile) {
     const config = this.buildConfig(profile);
-    const host = config.dbType === 'mysql' ? config.host : config.server;
-    const port = config.dbType === 'mysql' ? parsePort(config.port, 3306) : parsePort(config.port, 1433);
+    const dbType = this.getDbType(profile);
+    const host = dbType === 'mysql' ? config.host : config.server;
+    const port = dbType === 'mysql' ? parsePort(config.port, 3306) : parsePort(config.port, 1433);
     await preflightSqlTcp(host, port, 5000);
 
     return this.withClient(profile, async ({ dialect, pool, conn }) => {
@@ -1845,6 +1844,163 @@ export default class AppSqlStore {
         }
         await tx.commit();
         return { synced: true, counts: { knowledgeBase: knowledgeBase.length } };
+      } catch (error) {
+        await tx.rollback();
+        throw error;
+      }
+    });
+  }
+
+  static async replaceKnowledgeBaseEntries(entries = [], onProgress = null) {
+    const profile = this.getActiveProfile();
+    if (!profile) return { synced: false, reason: 'No active app SQL profile' };
+
+    const safeEntries = Array.isArray(entries)
+      ? entries.filter((e) => e && e.normalizedTitle)
+      : [];
+    const deduped = new Map();
+    for (const entry of safeEntries) {
+      // De-dupe by normalized title so MySQL unique constraint never fails
+      deduped.set(entry.normalizedTitle, entry);
+    }
+    const uniqueEntries = Array.from(deduped.values());
+    if (!uniqueEntries.length) {
+      return { synced: false, reason: 'No knowledge base entries to sync' };
+    }
+
+    await this.ensureSchema(profile);
+    if (onProgress) {
+      onProgress({
+        percent: 72,
+        message: `sending to App SQL 0/${uniqueEntries.length} (72%)`
+      });
+    }
+
+    return this.withClient(profile, async ({ dialect, pool, conn, mssql }) => {
+      if (dialect === 'mysql') {
+        await conn.beginTransaction();
+        try {
+          await conn.query('DELETE FROM app_title_knowledge_base');
+          const chunks = chunkArray(uniqueEntries, 500);
+          let processed = 0;
+          for (const chunk of chunks) {
+            const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
+            const params = [];
+            const now = new Date();
+            chunk.forEach((entry) => {
+              params.push(
+                null,
+                entry.normalizedTitle,
+                entry.title || null,
+                entry.sku || null,
+                entry.category || null,
+                JSON.stringify(entry.cartridgeModels || []),
+                entry.printerBrand || null,
+                entry.series || null,
+                JSON.stringify(entry.printerModels || []),
+                entry.setOf || null,
+                entry.qty || null,
+                entry.color || null,
+                entry.extra || null,
+                Number(entry.confidence || 95),
+                entry.source || null,
+                0,
+                now,
+                now
+              );
+            });
+            await conn.query(
+              `INSERT INTO app_title_knowledge_base (
+                 local_id, normalized_title, title, sku, category, cartridge_models, printer_brand,
+                 series, printer_models, set_of, qty, color, extra, confidence, source, usage_count,
+                 created_at, updated_at
+               ) VALUES ${placeholders}`,
+              params
+            );
+            processed += chunk.length;
+            if (onProgress) {
+              const remotePercent = 72 + Math.round((processed / Math.max(1, uniqueEntries.length)) * 27);
+              const pct = Math.min(99, remotePercent);
+              onProgress({
+                percent: pct,
+                message: `sending to App SQL ${processed}/${uniqueEntries.length} (${pct}%)`
+              });
+            }
+          }
+          await conn.commit();
+          return { synced: true, counts: { knowledgeBase: uniqueEntries.length } };
+        } catch (error) {
+          await conn.rollback();
+          throw error;
+        }
+      }
+
+      const tx = new mssql.Transaction(pool);
+      await tx.begin();
+      try {
+        await new mssql.Request(tx).query('DELETE FROM dbo.app_title_knowledge_base;');
+        const chunks = chunkArray(uniqueEntries, 1000);
+        let processed = 0;
+        for (const chunk of chunks) {
+          const table = new mssql.Table('dbo.app_title_knowledge_base');
+          table.create = false;
+          table.columns.add('local_id', mssql.Int, { nullable: true });
+          table.columns.add('normalized_title', mssql.NVarChar(1000), { nullable: true });
+          table.columns.add('title', mssql.NVarChar(mssql.MAX), { nullable: true });
+          table.columns.add('sku', mssql.NVarChar(255), { nullable: true });
+          table.columns.add('category', mssql.NVarChar(255), { nullable: true });
+          table.columns.add('cartridge_models', mssql.NVarChar(mssql.MAX), { nullable: true });
+          table.columns.add('printer_brand', mssql.NVarChar(255), { nullable: true });
+          table.columns.add('series', mssql.NVarChar(255), { nullable: true });
+          table.columns.add('printer_models', mssql.NVarChar(mssql.MAX), { nullable: true });
+          table.columns.add('set_of', mssql.NVarChar(100), { nullable: true });
+          table.columns.add('qty', mssql.NVarChar(50), { nullable: true });
+          table.columns.add('color', mssql.NVarChar(100), { nullable: true });
+          table.columns.add('extra', mssql.NVarChar(255), { nullable: true });
+          table.columns.add('confidence', mssql.Int, { nullable: true });
+          table.columns.add('source', mssql.NVarChar(100), { nullable: true });
+          table.columns.add('usage_count', mssql.Int, { nullable: true });
+          table.columns.add('created_at', mssql.DateTime2, { nullable: true });
+          table.columns.add('updated_at', mssql.DateTime2, { nullable: true });
+
+          const now = new Date();
+          chunk.forEach((entry) => {
+            table.rows.add(
+              null,
+              entry.normalizedTitle,
+              entry.title || null,
+              entry.sku || null,
+              entry.category || null,
+              JSON.stringify(entry.cartridgeModels || []),
+              entry.printerBrand || null,
+              entry.series || null,
+              JSON.stringify(entry.printerModels || []),
+              entry.setOf || null,
+              entry.qty || null,
+              entry.color || null,
+              entry.extra || null,
+              Number(entry.confidence || 95),
+              entry.source || null,
+              0,
+              now,
+              now
+            );
+          });
+
+          const r = new mssql.Request(tx);
+          await r.bulk(table);
+          processed += chunk.length;
+          if (onProgress) {
+            const remotePercent = 72 + Math.round((processed / Math.max(1, uniqueEntries.length)) * 27);
+            const pct = Math.min(99, remotePercent);
+            onProgress({
+              percent: pct,
+              message: `sending to App SQL ${processed}/${uniqueEntries.length} (${pct}%)`
+            });
+          }
+        }
+        await tx.commit();
+        return { synced: true, counts: { knowledgeBase: uniqueEntries.length } };
       } catch (error) {
         await tx.rollback();
         throw error;
