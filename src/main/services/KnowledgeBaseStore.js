@@ -21,6 +21,16 @@ function splitCodeList(value) {
     .filter(Boolean);
 }
 
+// Like splitCodeList but does NOT split on '/' — used for printer models where
+// '/' is part of the model variant suffix (e.g. "SL-M 2825 DW/SEE"), not a separator.
+function splitModelList(value) {
+  if (value === null || value === undefined) return [];
+  return String(value)
+    .split(/[|,;]+/g)
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
 function getRawField(raw, candidates = []) {
   if (!raw || typeof raw !== 'object') return '';
   const entries = Object.entries(raw);
@@ -47,6 +57,14 @@ function toCleanList(value) {
     return [...new Set(value.map((x) => String(x || '').trim()).filter(Boolean))];
   }
   return [...new Set(splitCodeList(value).map((x) => String(x || '').trim()).filter(Boolean))];
+}
+
+// Like toCleanList but uses splitModelList — preserves '/' within printer model names.
+function toCleanModelList(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((x) => String(x || '').trim()).filter(Boolean))];
+  }
+  return [...new Set(splitModelList(value).map((x) => String(x || '').trim()).filter(Boolean))];
 }
 
 function mergeSeriesWithPrinterModels(series, printerModels) {
@@ -238,20 +256,28 @@ export default class KnowledgeBaseStore {
       }
       return [];
     };
+    // Printer models must not split on '/' (e.g. "SL-M 2825 DW/SEE" is one model, not two)
+    const pickModelList = (...vals) => {
+      for (const v of vals) {
+        const list = toCleanModelList(v);
+        if (list.length) return list;
+      }
+      return [];
+    };
 
-    const category = pick(fields.category, seed.category, extracted.category, 'Toner');
+    const category = pick(fields.category, seed.category, extracted.category);
     const printerBrand = pick(fields.printerBrand, seed.printerBrand, extracted.printerBrand);
     const series = pick(fields.series, seed.series, extracted.series);
     const cartridgeModels = pickList(fields.cartridgeModels, seed.cartridgeModels, extracted.cartridgeModels);
     const printerModels = mergeSeriesWithPrinterModels(
       series,
-      pickList(fields.printerModels, seed.printerModels, extracted.printerModels)
+      pickModelList(fields.printerModels, seed.printerModels, extracted.printerModels)
     );
     const setOf = pick(fields.setOf, seed.setOf, extracted.setOf);
     const qty = pick(fields.qty, seed.qty, extracted.qty);
     const color = pick(fields.color, seed.color, extracted.color);
 
-    // Require at least one meaningful field to avoid completely empty entries
+    // Require at least one printer-specific field — non-printer products are excluded
     if (
       !cartridgeModels.length &&
       !printerBrand &&

@@ -356,6 +356,7 @@ export default class AppSqlStore {
             local_id INT NULL,
             normalized_title VARCHAR(1000) NOT NULL,
             title LONGTEXT NULL,
+            item_number VARCHAR(255) NULL,
             sku VARCHAR(255) NULL,
             category VARCHAR(255) NULL,
             cartridge_models LONGTEXT NULL,
@@ -436,6 +437,7 @@ export default class AppSqlStore {
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS model_rotation VARCHAR(255) NULL;
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS marketplace VARCHAR(50) NULL;
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS last_used_at DATETIME NULL;
+          ALTER TABLE app_title_knowledge_base ADD COLUMN IF NOT EXISTS item_number VARCHAR(255) NULL;
         `);
         return true;
       }
@@ -564,6 +566,7 @@ export default class AppSqlStore {
             local_id INT NULL,
             normalized_title NVARCHAR(1000) NOT NULL UNIQUE,
             title NVARCHAR(MAX) NULL,
+            item_number NVARCHAR(255) NULL,
             sku NVARCHAR(255) NULL,
             category NVARCHAR(255) NULL,
             cartridge_models NVARCHAR(MAX) NULL,
@@ -654,6 +657,8 @@ export default class AppSqlStore {
           ALTER TABLE dbo.app_generated_titles ADD marketplace NVARCHAR(50) NULL;
         IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.app_generated_titles') AND name = 'last_used_at')
           ALTER TABLE dbo.app_generated_titles ADD last_used_at DATETIME2 NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.app_title_knowledge_base') AND name = 'item_number')
+          ALTER TABLE dbo.app_title_knowledge_base ADD item_number NVARCHAR(255) NULL;
       `);
       return true;
     });
@@ -1313,14 +1318,15 @@ export default class AppSqlStore {
           for (const row of knowledgeBase) {
             await conn.query(
               `INSERT INTO app_title_knowledge_base (
-                 local_id, normalized_title, title, sku, category, cartridge_models, printer_brand,
+                 local_id, normalized_title, title, item_number, sku, category, cartridge_models, printer_brand,
                  series, printer_models, set_of, qty, color, extra, confidence, source, usage_count,
                  created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 row.id ?? null,
                 row.normalized_title || null,
                 row.title || null,
+                row.item_number || null,
                 row.sku || null,
                 row.category || null,
                 row.cartridge_models || null,
@@ -1569,6 +1575,7 @@ export default class AppSqlStore {
           r.input('local_id', mssql.Int, row.id ?? null);
           r.input('normalized_title', mssql.NVarChar(1000), row.normalized_title || null);
           r.input('title', mssql.NVarChar(mssql.MAX), row.title || null);
+          r.input('item_number', mssql.NVarChar(255), row.item_number || null);
           r.input('sku', mssql.NVarChar(255), row.sku || null);
           r.input('category', mssql.NVarChar(255), row.category || null);
           r.input('cartridge_models', mssql.NVarChar(mssql.MAX), row.cartridge_models || null);
@@ -1586,11 +1593,11 @@ export default class AppSqlStore {
           r.input('updated_at', mssql.DateTime2, toDate(row.updated_at));
           await r.query(`
             INSERT INTO dbo.app_title_knowledge_base (
-              local_id, normalized_title, title, sku, category, cartridge_models, printer_brand,
+              local_id, normalized_title, title, item_number, sku, category, cartridge_models, printer_brand,
               series, printer_models, set_of, qty, color, extra, confidence, source, usage_count,
               created_at, updated_at
             ) VALUES (
-              @local_id, @normalized_title, @title, @sku, @category, @cartridge_models, @printer_brand,
+              @local_id, @normalized_title, @title, @item_number, @sku, @category, @cartridge_models, @printer_brand,
               @series, @printer_models, @set_of, @qty, @color, @extra, @confidence, @source, @usage_count,
               @created_at, @updated_at
             )
@@ -1729,13 +1736,14 @@ export default class AppSqlStore {
           const chunks = chunkArray(knowledgeBase, 500);
           let processed = 0;
           for (const chunk of chunks) {
-            const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
+            const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
             const params = [];
             chunk.forEach((row) => {
               params.push(
                 row.id ?? null,
                 row.normalized_title || null,
                 row.title || null,
+                row.item_number || null,
                 row.sku || null,
                 row.category || null,
                 row.cartridge_models || null,
@@ -1755,7 +1763,7 @@ export default class AppSqlStore {
             });
             await conn.query(
               `INSERT INTO app_title_knowledge_base (
-                 local_id, normalized_title, title, sku, category, cartridge_models, printer_brand,
+                 local_id, normalized_title, title, item_number, sku, category, cartridge_models, printer_brand,
                  series, printer_models, set_of, qty, color, extra, confidence, source, usage_count,
                  created_at, updated_at
                ) VALUES ${placeholders}`,
@@ -1791,6 +1799,7 @@ export default class AppSqlStore {
           table.columns.add('local_id', mssql.Int, { nullable: true });
           table.columns.add('normalized_title', mssql.NVarChar(1000), { nullable: true });
           table.columns.add('title', mssql.NVarChar(mssql.MAX), { nullable: true });
+          table.columns.add('item_number', mssql.NVarChar(255), { nullable: true });
           table.columns.add('sku', mssql.NVarChar(255), { nullable: true });
           table.columns.add('category', mssql.NVarChar(255), { nullable: true });
           table.columns.add('cartridge_models', mssql.NVarChar(mssql.MAX), { nullable: true });
@@ -1812,6 +1821,7 @@ export default class AppSqlStore {
               row.id ?? null,
               row.normalized_title || null,
               row.title || null,
+              row.item_number || null,
               row.sku || null,
               row.category || null,
               row.cartridge_models || null,
@@ -1884,7 +1894,7 @@ export default class AppSqlStore {
           const chunks = chunkArray(uniqueEntries, 500);
           let processed = 0;
           for (const chunk of chunks) {
-            const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
+            const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
             const params = [];
             const now = new Date();
             chunk.forEach((entry) => {
@@ -1892,6 +1902,7 @@ export default class AppSqlStore {
                 null,
                 entry.normalizedTitle,
                 entry.title || null,
+                entry.itemNumber || null,
                 entry.sku || null,
                 entry.category || null,
                 JSON.stringify(entry.cartridgeModels || []),
@@ -1911,7 +1922,7 @@ export default class AppSqlStore {
             });
             await conn.query(
               `INSERT INTO app_title_knowledge_base (
-                 local_id, normalized_title, title, sku, category, cartridge_models, printer_brand,
+                 local_id, normalized_title, title, item_number, sku, category, cartridge_models, printer_brand,
                  series, printer_models, set_of, qty, color, extra, confidence, source, usage_count,
                  created_at, updated_at
                ) VALUES ${placeholders}`,
@@ -1947,6 +1958,7 @@ export default class AppSqlStore {
           table.columns.add('local_id', mssql.Int, { nullable: true });
           table.columns.add('normalized_title', mssql.NVarChar(1000), { nullable: true });
           table.columns.add('title', mssql.NVarChar(mssql.MAX), { nullable: true });
+          table.columns.add('item_number', mssql.NVarChar(255), { nullable: true });
           table.columns.add('sku', mssql.NVarChar(255), { nullable: true });
           table.columns.add('category', mssql.NVarChar(255), { nullable: true });
           table.columns.add('cartridge_models', mssql.NVarChar(mssql.MAX), { nullable: true });
@@ -1969,6 +1981,7 @@ export default class AppSqlStore {
               null,
               entry.normalizedTitle,
               entry.title || null,
+              entry.itemNumber || null,
               entry.sku || null,
               entry.category || null,
               JSON.stringify(entry.cartridgeModels || []),

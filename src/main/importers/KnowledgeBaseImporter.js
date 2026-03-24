@@ -66,14 +66,35 @@ export default class KnowledgeBaseImporter {
 
     for (let i = 2; i <= sheet.rowCount; i += 1) {
       const row = sheet.getRow(i);
-      const title = getFirstCell(row, headerMap, [
-        'Old title', 'Artiklename', 'Artikelname', 'Title', 'original_title', 'Angebotstitel', 'name'
+      let title = getFirstCell(row, headerMap, [
+        'Old title', 'Artiklename', 'Artikelname', 'Title', 'original_title', 'Angebotstitel',
+        'name', 'product name', 'Product Name', 'product_name', 'ProductName',
+        'item name', 'Item Name', 'item_name',
+        'Bezeichnung', 'bezeichnung', 'Produktname', 'produktname',
+        'description', 'Description', 'Beschreibung', 'beschreibung'
       ]);
+      // Strip variant suffix after pipe (e.g. "Product Title | 1x Schwarz" → "Product Title").
+      // Variant info (color, set) is already captured from dedicated columns.
+      if (title && title.includes('|')) {
+        title = title.split('|')[0].trim();
+      }
       const sku = getFirstCell(row, headerMap, [
-        'SKU', 'Artiklenummer (SKU)', 'Artikelnummer (SKU)', 'Custom label (SKU)', 'sku', 'Artikelnummer', 'cArtNr'
+        'SKU', 'Artiklenummer (SKU)', 'Artikelnummer (SKU)', 'Custom label (SKU)',
+        'sku', 'Artikelnummer', 'cArtNr',
+        'product sku', 'Product SKU', 'product_sku',
+        'part number', 'Part Number', 'part_number', 'PartNumber',
+        'model number', 'Model Number', 'model_number',
+        'Bestellnummer', 'bestellnummer', 'Teilenummer', 'teilenummer'
       ]);
       const itemNumber = getFirstCell(row, headerMap, [
-        'Item number', 'item_number', 'ebay item number', 'Angebotsnummer', 'ItemID', 'item_id'
+        'item_number', 'Item number', 'item number', 'Item Number',
+        'ItemID', 'Item ID', 'item id', 'item_id',
+        'itemnumber', 'ItemNumber',
+        'item no', 'Item No', 'item #',
+        'ebay item number', 'ebay item id',
+        'Angebotsnummer', 'angebotsnummer',
+        'Artikel-ID', 'artikel-id',
+        'eBay-Artikelnummer', 'ebay-artikelnummer'
       ]);
       if (!title) {
         skipped += 1;
@@ -91,10 +112,13 @@ export default class KnowledgeBaseImporter {
             'Cartridge model', 'cartridge_model', 'Cartridge mode', 'Cartridge Model', 'Tintenpatrone', 'Tonermodell'
           ]),
           category: getFirstCell(row, headerMap, [
-            'Types', 'Type', 'Category', 'category', 'Kategorie', 'typ'
+            'Types', 'Type', 'Category', 'category', 'Kategorie', 'typ',
+            'product type', 'Product Type', 'product_type', 'Produkttyp',
+            'art', 'Art', 'Warengruppe', 'warengruppe'
           ]),
           printerBrand: getFirstCell(row, headerMap, [
-            'Printer Brand', 'printer_brand', 'Druckermarke', 'Hersteller'
+            'Printer Brand', 'printer_brand', 'Druckermarke', 'Hersteller',
+            'Brand', 'brand', 'Marke', 'marke', 'Manufacturer', 'manufacturer'
           ]),
           series: getFirstCell(row, headerMap, ['Series', 'series', 'Serie', 'Produktserie']),
           printerModels: getFirstCell(row, headerMap, [

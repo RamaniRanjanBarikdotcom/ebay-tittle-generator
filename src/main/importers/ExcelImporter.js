@@ -3,6 +3,7 @@ import Product from '../database/models/Product.js';
 import DatabaseManager from '../database/sqlite.js';
 import { calculatePriceAdjustment } from '../pricing/PriceAdjuster.js';
 import { fixMojibakeText } from '../utils/textEncoding.js';
+import { isPrinterConsumable } from '../utils/printerConsumable.js';
 
 const HEADER_ALIASES = {
   item_number: [
@@ -103,38 +104,6 @@ function getCell(row, colIndex) {
   return value;
 }
 
-// Keywords that identify valid printer consumable products.
-// Any title matching at least one of these is allowed through.
-const PRINTER_CONSUMABLE_KEYWORDS = [
-  // German
-  'tintenpatrone',
-  'druckerpatrone',
-  'toner',
-  'tonerkartusche',
-  'trommel',
-  'trommeleinheit',
-  'druckerpatrone',
-  'patrone',
-  'kartusche',
-  'druckkartusche',
-  'kompatibel',   // "Kompatibel für HP ..." is always a printer consumable context
-  // English
-  'ink cartridge',
-  'toner cartridge',
-  'drum unit',
-  'drum cartridge',
-  'inkjet',
-  'laser cartridge'
-];
-
-const PRINTER_CONSUMABLE_RE = new RegExp(
-  PRINTER_CONSUMABLE_KEYWORDS.map((k) => k.replace(/\s+/g, '\\s+')).join('|'),
-  'i'
-);
-
-function isPrinterConsumable(title) {
-  return PRINTER_CONSUMABLE_RE.test(title);
-}
 
 function isZeroSoldCount(value) {
   if (value === 0 || value === '0') return true;

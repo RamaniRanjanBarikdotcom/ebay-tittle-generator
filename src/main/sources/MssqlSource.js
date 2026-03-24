@@ -3,6 +3,7 @@ import DatabaseManager from '../database/sqlite.js';
 import { calculatePriceAdjustment } from '../pricing/PriceAdjuster.js';
 import { fixMojibakeText } from '../utils/textEncoding.js';
 import { preflightSqlTcp, parsePort } from '../utils/sqlNetCheck.js';
+import { isPrinterConsumable } from '../utils/printerConsumable.js';
 
 function normalizeAuthentication(value) {
   const mode = String(value || 'sql').trim().toLowerCase();
@@ -329,6 +330,7 @@ ORDER BY
       const mapped = [];
       const errors = [];
       let skippedSoldNotZero = 0;
+      let skippedNonPrinter = 0;
       const db = DatabaseManager.getDatabase();
       const getPreviousZeroSoldAdjustment = db.prepare(
         `SELECT price_adjustment
@@ -349,6 +351,10 @@ ORDER BY
           errors.push({ row: index + 1, error: 'Missing required fields: item_number, sku, original_title' });
           return;
         }
+        if (!isPrinterConsumable(product.original_title)) {
+          skippedNonPrinter += 1;
+          return;
+        }
         if (!isZeroSoldCount(product.sold_count)) {
           skippedSoldNotZero += 1;
           return;
@@ -364,7 +370,8 @@ ORDER BY
       return {
         total: rows.length,
         inserted: insertResult.data?.inserted || 0,
-        skipped: (insertResult.data?.skipped || 0) + skippedSoldNotZero,
+        skipped: (insertResult.data?.skipped || 0) + skippedSoldNotZero + skippedNonPrinter,
+        skippedNonPrinter,
         errors
       };
     } finally {
@@ -447,6 +454,7 @@ ORDER BY
       const mapped = [];
       const errors = [];
       let skippedSoldNotZero = 0;
+      let skippedNonPrinter = 0;
       const db = DatabaseManager.getDatabase();
       const getPreviousZeroSoldAdjustment = db.prepare(
         `SELECT price_adjustment
@@ -467,6 +475,10 @@ ORDER BY
           errors.push({ row: index + 1, error: 'Missing required fields: item_number, sku, original_title' });
           return;
         }
+        if (!isPrinterConsumable(product.original_title)) {
+          skippedNonPrinter += 1;
+          return;
+        }
         if (!isZeroSoldCount(product.sold_count)) {
           skippedSoldNotZero += 1;
           return;
@@ -482,7 +494,8 @@ ORDER BY
       return {
         total: rows.length,
         inserted: insertResult.data?.inserted || 0,
-        skipped: (insertResult.data?.skipped || 0) + skippedSoldNotZero,
+        skipped: (insertResult.data?.skipped || 0) + skippedSoldNotZero + skippedNonPrinter,
+        skippedNonPrinter,
         errors
       };
     } finally {

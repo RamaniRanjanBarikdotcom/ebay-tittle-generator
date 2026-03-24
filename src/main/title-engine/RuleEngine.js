@@ -48,9 +48,19 @@ function scoreTitle(title, minLength, maxLength, ideal) {
   return (minLength - len) * 2 + Math.abs(len - ideal);
 }
 
+function removeDanglingKompatibel(s) {
+  // "Kompatibel" at the end without "für" means the phrase was split by truncation or
+  // the candidate template placed "Kompatibel für" last but ran out of space.
+  // Remove the dangling word — an incomplete "Kompatibel" is worse than no Kompatibel.
+  return s.replace(/\s*\bKompatibel\s*$/i, '').trim();
+}
+
 function truncateToMax(title, maxLength) {
   let out = norm(title);
-  if (out.length <= maxLength) return out;
+
+  if (out.length <= maxLength) {
+    return removeDanglingKompatibel(out);
+  }
 
   // Pipe-aware: trim words before the pipe, preserve the tail (e.g. "| 1x Schwarz")
   const pipeIdx = out.lastIndexOf(' | ');
@@ -63,17 +73,17 @@ function truncateToMax(title, maxLength) {
     }
     out = norm(words.join(' ')) + tail;
     if (out.length > maxLength) out = out.slice(0, maxLength).trim();
-    return out;
+  } else {
+    // No pipe — original word-pop logic
+    const words = out.split(' ');
+    while (words.length > 2 && words.join(' ').length > maxLength) {
+      words.pop();
+    }
+    out = norm(words.join(' '));
+    if (out.length > maxLength) out = out.slice(0, maxLength).trim();
   }
 
-  // No pipe — original word-pop logic
-  const words = out.split(' ');
-  while (words.length > 2 && words.join(' ').length > maxLength) {
-    words.pop();
-  }
-  out = norm(words.join(' '));
-  if (out.length > maxLength) out = out.slice(0, maxLength).trim();
-  return out;
+  return removeDanglingKompatibel(out);
 }
 
 function padIfShort(title, minLength, maxLength, hasPrinterModels = true) {
@@ -1150,7 +1160,7 @@ export default class RuleEngine {
         candidates.push(
           norm([cb, kompatibel, printerBlock].filter(Boolean).join(' ')) + tailStr,
           norm([kompatibel, printerBlock, cb].filter(Boolean).join(' ')) + tailStr,
-          norm([printerBlock, cb, kompatibel].filter(Boolean).join(' ')) + tailStr
+          norm([printerBlock, kompatibel, cb].filter(Boolean).join(' ')) + tailStr
         );
       }
       return candidates.filter(Boolean);

@@ -14,7 +14,7 @@ const PRICE_DELTA = 0.02;
 
 // Bump this string whenever RuleEngine extraction logic changes.
 // All cached extracted_elements rows with a different version will be re-extracted.
-const EXTRACTION_CACHE_VERSION = 'v3-2026-03';
+const EXTRACTION_CACHE_VERSION = 'v4-2026-03';
 
 function parseLooseNumber(value) {
   if (value === null || value === undefined) return NaN;
@@ -221,6 +221,13 @@ export default class PipelineRunner {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
     );
 
+    // Delete stale titles for this product+marketplace before inserting fresh ones.
+    // This ensures re-running the pipeline always replaces old titles rather than
+    // accumulating duplicates via INSERT OR IGNORE.
+    const deleteStaleForProduct = db.prepare(
+      'DELETE FROM generated_titles WHERE product_id = ? AND marketplace = ? AND session_id = ?'
+    );
+
     const updatePriceAnalysis = db.prepare(
       `UPDATE products
        SET suggested_price = ?, price_adjustment = ?, price_update_status = ?
@@ -350,6 +357,24 @@ export default class PipelineRunner {
             }
           }
 
+          // For eBay: "Kompatibel für" is mandatory in EVERY stored variation.
+          // Filter out any candidate that lacks it, then prepend a forced title if needed.
+          if (marketplace === 'ebay' && candidates.length > 0) {
+            const hasKompatibel = (c) => /kompatibel\s+für/i.test(c);
+            const validCandidates = candidates.filter(hasKompatibel);
+            if (validCandidates.length < candidates.length) {
+              // At least one candidate is missing "Kompatibel für" — rebuild
+              const analysisTitle = TitleSanitizer.sanitizeForAnalysis(product.original_title || '');
+              const forced = TitleGenerator.buildForcedTitle({ analysisTitle, maxLength: 80 });
+              if (forced && hasKompatibel(forced)) {
+                candidates = [forced, ...validCandidates].slice(0, 3);
+              } else if (validCandidates.length > 0) {
+                candidates = validCandidates;
+              }
+              // else: no valid candidates available — keep originals and let stale-delete handle it
+            }
+          }
+
           // For non-eBay: use best single title (no fallback needed)
           if (!candidates.length && marketplace !== 'ebay') {
             candidates = composed.newTitle ? [composed.newTitle] : [];
@@ -359,6 +384,10 @@ export default class PipelineRunner {
 
           // For eBay store up to 3 variations; for other markets store 1 best
           const titlesToInsert = marketplace === 'ebay' ? candidates.slice(0, 3) : [candidates[0]];
+
+          // Delete stale titles for this product+marketplace so re-runs always
+          // replace old titles rather than leaving duplicates via INSERT OR IGNORE.
+          deleteStaleForProduct.run(product.id, marketplace, sessionId || null);
 
           titlesToInsert.forEach((title, idx) => {
             const titleHash = hashTitle(`${title}||${marketplace}||${product.id}||${idx}`);

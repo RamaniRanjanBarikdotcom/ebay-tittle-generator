@@ -57,7 +57,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('db-agent-status', listener);
     return () => ipcRenderer.removeListener('db-agent-status', listener);
   },
-  onProgress: (handler) => ipcRenderer.on('progress', (_event, data) => handler(data)),
+  onProgress: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on('progress', listener);
+    return () => ipcRenderer.removeListener('progress', listener);
+  },
   onAutomationStatus: (handler) => {
     const listener = (_event, data) => handler(data);
     ipcRenderer.on('automation-status', listener);

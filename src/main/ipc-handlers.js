@@ -1442,35 +1442,26 @@ export function registerIpcHandlers(mainWindow) {
     if (!filePath) return { success: false, data: null, error: 'No file path provided' };
     try {
       sendProgress({ scope: 'kb-import', percent: 1, message: 'reading Excel' });
-      const primaryMysql = isPrimaryMysqlActive();
       const result = await KnowledgeBaseImporter.importFile(filePath, (progress) => {
         sendProgress({
           scope: 'kb-import',
           percent: progress?.percent ?? 0,
           message: progress?.message || 'saving local DB'
         });
-      }, { collectEntries: primaryMysql });
+      });
       const db = DatabaseManager.getDatabase();
       const sessionId = resolveSessionId(db);
+      // Always sync ALL local KB entries to remote (not just the current file's entries).
+      // This ensures previously imported KB data is never wiped from the remote table.
       let remoteSync = { synced: false };
       try {
-        if (primaryMysql && Array.isArray(result?.entries)) {
-          remoteSync = await AppSqlStore.replaceKnowledgeBaseEntries(result.entries, (progress) => {
-            sendProgress({
-              scope: 'kb-import',
-              percent: progress?.percent ?? 75,
-              message: progress?.message || 'sending to App SQL'
-            });
+        remoteSync = await AppSqlStore.syncKnowledgeBase((progress) => {
+          sendProgress({
+            scope: 'kb-import',
+            percent: progress?.percent ?? 75,
+            message: progress?.message || 'sending to App SQL'
           });
-        } else {
-          remoteSync = await AppSqlStore.syncKnowledgeBase((progress) => {
-            sendProgress({
-              scope: 'kb-import',
-              percent: progress?.percent ?? 75,
-              message: progress?.message || 'sending to App SQL'
-            });
-          });
-        }
+        });
       } catch (error) {
         remoteSync = { synced: false, error: error.message };
       }

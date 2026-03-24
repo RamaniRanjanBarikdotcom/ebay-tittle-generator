@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 
 function createWindow() {
   const isDev = !app.isPackaged;
-  const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173/';
+  const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5181/';
 
   const win = new BrowserWindow({
     width: 1200,
@@ -37,7 +37,7 @@ function createWindow() {
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error('[App] Renderer failed to load:', code, desc, url);
     if (isDev) {
-      const fallbackUrl = 'http://127.0.0.1:5173/';
+      const fallbackUrl = 'http://127.0.0.1:5181/';
       console.log('[App] Retrying renderer URL:', fallbackUrl);
       win.loadURL(fallbackUrl);
     }
@@ -85,11 +85,6 @@ app.whenReady().then(() => {
         handlersRegistered = true;
         console.log('[App] IPC handlers registered');
       }
-
-      const sqlAgent = getSqlServerAgent();
-      sqlAgent.start().catch((err) => {
-        console.error('[App] SQL agent start error:', err);
-      });
 
       return mainWindow;
     })

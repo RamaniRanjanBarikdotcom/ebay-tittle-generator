@@ -501,14 +501,12 @@ export default class TitleGenerator {
    * Truncate title to max length
    */
   static truncateTitle(title, maxLength) {
-    if (title.length <= maxLength) return title;
-
     const words = title.split(' ');
     while (words.length > 3 && words.join(' ').length > maxLength) {
       words.pop();
     }
-
-    return words.join(' ');
+    // Remove dangling "Kompatibel" without "für" — truncation may have split the phrase
+    return words.join(' ').replace(/\s*\bKompatibel\s*$/i, '').trim();
   }
 
   /**
