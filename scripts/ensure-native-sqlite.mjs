@@ -16,6 +16,10 @@ const markerPath = path.join(cwd, 'node_modules', '.cache', 'better-sqlite3-elec
 
 function getFileInfo() {
   if (!existsSync(modulePath)) return '';
+  if (process.platform === 'win32') {
+    // `file` is not available on Windows; presence of the module is sufficient here.
+    return 'PE32+';
+  }
   try {
     return execSync(`file "${modulePath}"`, { encoding: 'utf8' });
   } catch {
