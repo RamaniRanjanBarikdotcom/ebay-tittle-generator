@@ -5,6 +5,10 @@ import { app } from 'electron';
 const PREFIX = 'enc:v1:';
 
 function getKey() {
+  const masterKey = process.env.ETG_MASTER_KEY || process.env.APP_SECRET_KEY;
+  if (masterKey && String(masterKey).trim()) {
+    return crypto.createHash('sha256').update(String(masterKey)).digest();
+  }
   const seed = [
     app.getName(),
     app.getPath('userData'),

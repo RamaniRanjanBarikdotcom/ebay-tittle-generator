@@ -122,7 +122,15 @@ export default class AppSqlStore {
     } catch {
       profiles = [];
     }
-    return { profiles, activeProfileId };
+    const normalized = profiles.map((p) => ({
+      ...p,
+      server: decryptText(p.server || ''),
+      database: decryptText(p.database || ''),
+      user: decryptText(p.user || ''),
+      port: decryptText(p.port || ''),
+      password: decryptText(p.password || '')
+    }));
+    return { profiles: normalized, activeProfileId };
   }
 
   static getActiveProfile() {
@@ -744,6 +752,9 @@ export default class AppSqlStore {
         const [history] = await conn.query('SELECT * FROM app_title_history ORDER BY id ASC');
         const [csv] = await conn.query('SELECT * FROM app_csv_exports ORDER BY id ASC');
         const [logs] = await conn.query('SELECT * FROM app_logs ORDER BY id ASC');
+        const [settings] = await conn.query(
+          'SELECT setting_key AS `key`, setting_value AS `value`, value_type FROM app_settings ORDER BY id ASC'
+        );
         const [kb] = await conn.query('SELECT * FROM app_title_knowledge_base ORDER BY id ASC');
         const [currentSessionRows] = await conn.query(
           "SELECT setting_value FROM app_settings WHERE setting_key = 'current_session_id' LIMIT 1"
@@ -768,6 +779,7 @@ export default class AppSqlStore {
           history: history || [],
           csv: csv || [],
           logs: logs || [],
+          settings: settings || [],
           knowledgeBase: kb || [],
           extractedElements,
           skuImportCounts,
@@ -781,6 +793,9 @@ export default class AppSqlStore {
       const historyRes = await pool.request().query('SELECT * FROM dbo.app_title_history ORDER BY id ASC');
       const csvRes = await pool.request().query('SELECT * FROM dbo.app_csv_exports ORDER BY id ASC');
       const logsRes = await pool.request().query('SELECT * FROM dbo.app_logs ORDER BY id ASC');
+      const settingsRes = await pool
+        .request()
+        .query('SELECT [key] AS [key], [value] AS [value], value_type FROM dbo.app_settings ORDER BY id ASC');
       const kbRes = await pool.request().query('SELECT * FROM dbo.app_title_knowledge_base ORDER BY id ASC');
       const currentSessionRes = await pool
         .request()
@@ -805,6 +820,7 @@ export default class AppSqlStore {
         history: historyRes.recordset || [],
         csv: csvRes.recordset || [],
         logs: logsRes.recordset || [],
+        settings: settingsRes.recordset || [],
         knowledgeBase: kbRes.recordset || [],
         extractedElements,
         skuImportCounts,
@@ -819,6 +835,7 @@ export default class AppSqlStore {
       remote.history.length ||
       remote.csv.length ||
       remote.logs.length ||
+      remote.settings.length ||
       remote.knowledgeBase.length ||
       remote.extractedElements.length ||
       remote.skuImportCounts.length ||
@@ -878,6 +895,12 @@ export default class AppSqlStore {
         `INSERT INTO app_logs (
           id, level, event, message, details, session_id, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      );
+
+      const upsertSetting = localDb.prepare(
+        `INSERT INTO app_settings (key, value, value_type)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, value_type = excluded.value_type`
       );
 
       const insKb = localDb.prepare(
@@ -1027,6 +1050,10 @@ export default class AppSqlStore {
           row.session_id || null,
           normalizeTimestampValue(row.created_at)
         );
+      }
+
+      for (const row of remote.settings || []) {
+        upsertSetting.run(row.key || '', row.value ?? null, row.value_type || 'string');
       }
 
       for (const row of remote.knowledgeBase) {
@@ -1702,6 +1729,62 @@ export default class AppSqlStore {
             priceHistory: priceHistory.length
           }
         };
+      } catch (error) {
+        await tx.rollback();
+        throw error;
+      }
+    });
+  }
+
+  static async syncSettings() {
+    const profile = this.getActiveProfile();
+    if (!profile) return { synced: false, reason: 'No active app SQL profile' };
+
+    await this.ensureSchema(profile);
+    const db = DatabaseManager.getDatabase();
+    const settings = db.prepare('SELECT [key], value, value_type FROM app_settings').all();
+
+    return this.withClient(profile, async ({ dialect, pool, conn, mssql }) => {
+      if (dialect === 'mysql') {
+        await conn.beginTransaction();
+        try {
+          for (const row of settings) {
+            await conn.query(
+              `INSERT INTO app_settings (setting_key, setting_value, value_type)
+               VALUES (?, ?, ?)
+               ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), value_type = VALUES(value_type), updated_at = CURRENT_TIMESTAMP`,
+              [row.key || '', row.value || null, row.value_type || null]
+            );
+          }
+          await conn.commit();
+        } catch (error) {
+          await conn.rollback();
+          throw error;
+        }
+        return { synced: true, count: settings.length };
+      }
+
+      const tx = new mssql.Transaction(pool);
+      await tx.begin();
+      try {
+        for (const row of settings) {
+          const r = new mssql.Request(tx);
+          r.input('key', mssql.NVarChar(120), row.key || '');
+          r.input('value', mssql.NVarChar(mssql.MAX), row.value || null);
+          r.input('value_type', mssql.NVarChar(20), row.value_type || null);
+          await r.query(`
+            MERGE dbo.app_settings AS t
+            USING (SELECT @key AS [key], @value AS [value], @value_type AS value_type) AS s
+            ON t.[key] = s.[key]
+            WHEN MATCHED THEN
+              UPDATE SET t.[value] = s.[value], t.value_type = s.value_type, t.updated_at = SYSUTCDATETIME()
+            WHEN NOT MATCHED THEN
+              INSERT ([key], [value], value_type, updated_at)
+              VALUES (s.[key], s.[value], s.value_type, SYSUTCDATETIME());
+          `);
+        }
+        await tx.commit();
+        return { synced: true, count: settings.length };
       } catch (error) {
         await tx.rollback();
         throw error;

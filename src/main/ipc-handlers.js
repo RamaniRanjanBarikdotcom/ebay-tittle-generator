@@ -1,4 +1,8 @@
 import { dialog, ipcMain } from 'electron';
+import { existsSync } from 'fs';
+import fs from 'fs/promises';
+import path from 'path';
+import { spawn } from 'child_process';
 import DatabaseManager from './database/sqlite.js';
 import { hashTitle } from '../shared/utils/hash.js';
 import GeneratedTitle from './database/models/GeneratedTitle.js';
@@ -200,6 +204,7 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.removeHandler('automation:setIntervalDays');
   ipcMain.removeHandler('automation:setCustomSchedule');
   ipcMain.removeHandler('automation:runNow');
+  ipcMain.removeHandler('ameise:getLogs');
   const sendProgress = (payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('progress', payload);
@@ -245,6 +250,88 @@ export function registerIpcHandlers(mainWindow) {
        VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, value_type = excluded.value_type`
     ).run(key, String(value), type);
+  };
+
+  const getAmeiseSettings = (db) => ({
+    enabled: getSettingValue(db, 'ameise_enabled', 'false') === 'true',
+    exePath: getSettingValue(db, 'ameise_exe_path', ''),
+    template: getSettingValue(db, 'ameise_template', 'IMP1'),
+    archiveFolder: getSettingValue(db, 'ameise_archive_folder', '')
+  });
+
+  const runAmeiseImport = async ({ filePath, sessionId }) => {
+    const db = DatabaseManager.getDatabase();
+    const settings = getAmeiseSettings(db);
+    if (!settings.enabled) return { skipped: true, reason: 'disabled' };
+
+    if (!settings.exePath || !existsSync(settings.exePath)) {
+      return { skipped: true, reason: 'missing_exe' };
+    }
+    if (!filePath || !existsSync(filePath)) {
+      return { skipped: true, reason: 'missing_csv' };
+    }
+
+    const { profiles, activeProfileId } = getDbProfilesState(db);
+    const profile = profiles.find((p) => p.id === activeProfileId);
+    if (!profile) return { skipped: true, reason: 'no_active_profile' };
+    if (String(profile.authentication || 'sql') !== 'sql') {
+      return { skipped: true, reason: 'sql_auth_required' };
+    }
+
+    const args = [
+      '-s',
+      profile.server,
+      '-d',
+      profile.database,
+      '-u',
+      profile.user || '',
+      '-p',
+      profile.password || '',
+      '-t',
+      settings.template || 'IMP1',
+      '-i',
+      filePath
+    ];
+
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn(settings.exePath, args, { windowsHide: true });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0) return resolve({ code });
+        return reject(new Error(stderr || `Ameise exited with code ${code}`));
+      });
+    });
+
+    let movedTo = null;
+    const archiveRoot = settings.archiveFolder
+      ? settings.archiveFolder
+      : path.join(path.dirname(filePath), 'abgearbeitet');
+    await fs.mkdir(archiveRoot, { recursive: true });
+    const dest = path.join(archiveRoot, path.basename(filePath));
+    try {
+      await fs.rename(filePath, dest);
+    } catch (error) {
+      if (error.code === 'EXDEV') {
+        await fs.copyFile(filePath, dest);
+        await fs.unlink(filePath);
+      } else {
+        throw error;
+      }
+    }
+    movedTo = dest;
+
+    logEvent(db, {
+      event: 'export.ameise',
+      message: 'Ameise import completed',
+      details: { filePath, movedTo, template: settings.template },
+      sessionId
+    });
+
+    return { success: true, movedTo, code: result.code || 0 };
   };
 
   const ensurePrimaryAppDbSetting = (db) => {
@@ -303,6 +390,10 @@ export function registerIpcHandlers(mainWindow) {
     }
     const normalized = profiles.map((p) => ({
       ...p,
+      server: decryptText(p.server || ''),
+      database: decryptText(p.database || ''),
+      user: decryptText(p.user || ''),
+      port: decryptText(p.port || ''),
       password: decryptText(p.password || '')
     }));
     const nextActive = normalized.some((p) => p.id === activeProfileId) ? activeProfileId : '';
@@ -312,6 +403,10 @@ export function registerIpcHandlers(mainWindow) {
   const persistJtlProfilesState = (db, profiles, activeProfileId) => {
     const encryptedProfiles = (profiles || []).map((p) => ({
       ...p,
+      server: p?.server ? encryptText(p.server) : '',
+      database: p?.database ? encryptText(p.database) : '',
+      user: p?.user ? encryptText(p.user) : '',
+      port: p?.port ? encryptText(p.port) : '',
       password: p?.password ? encryptText(p.password) : ''
     }));
     setSettingValue(db, 'jtl_db_profiles', JSON.stringify(encryptedProfiles), 'string');
@@ -334,6 +429,18 @@ export function registerIpcHandlers(mainWindow) {
         pendingSyncSessions.delete(sessionId);
       }
     }, 0);
+  };
+
+  let settingsSyncTimer = null;
+  const queueSettingsSync = () => {
+    if (settingsSyncTimer) clearTimeout(settingsSyncTimer);
+    settingsSyncTimer = setTimeout(async () => {
+      try {
+        await AppSqlStore.syncSettings();
+      } catch (error) {
+        console.error('[AppSqlSync] settings sync failed:', error.message);
+      }
+    }, 200);
   };
 
   // Push all local sessions to MySQL — used when a profile is first configured on a system with existing data
@@ -694,6 +801,7 @@ export function registerIpcHandlers(mainWindow) {
          VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, value_type = excluded.value_type`
       ).run(key, String(value), valueType);
+      queueSettingsSync();
       return { success: true, data: { key, value }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -741,6 +849,7 @@ export function registerIpcHandlers(mainWindow) {
       const nextActive = payload?.setActive ? id : activeProfileId || id;
       persistJtlProfilesState(db, profiles, nextActive);
       sqlAgent.refreshNow().catch(() => {});
+      queueSettingsSync();
       return { success: true, data: { id: nextProfile.id, profiles, activeProfileId: nextActive }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -756,6 +865,7 @@ export function registerIpcHandlers(mainWindow) {
       const nextActive = activeProfileId === id ? (nextProfiles[0]?.id || '') : activeProfileId;
       persistJtlProfilesState(db, nextProfiles, nextActive);
       sqlAgent.refreshNow().catch(() => {});
+      queueSettingsSync();
       return { success: true, data: { profiles: nextProfiles, activeProfileId: nextActive }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -768,6 +878,7 @@ export function registerIpcHandlers(mainWindow) {
       const { profiles } = getJtlDbProfilesState(db);
       persistJtlProfilesState(db, profiles, payload?.id || '');
       sqlAgent.refreshNow().catch(() => {});
+      queueSettingsSync();
       return { success: true, data: { activeProfileId: payload?.id || '' }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -791,6 +902,10 @@ export function registerIpcHandlers(mainWindow) {
       const sanitized = (profiles || []).map((p) => ({
         ...p,
         dbType: AppSqlStore.getDbType(p),
+        server: decryptText(p.server || ''),
+        database: decryptText(p.database || ''),
+        user: decryptText(p.user || ''),
+        port: decryptText(p.port || ''),
         password: p?.password ? decryptText(p.password) : ''
       }));
       return { success: true, data: { profiles: sanitized, activeProfileId }, error: null };
@@ -809,12 +924,12 @@ export function registerIpcHandlers(mainWindow) {
         id,
         name: profile.name || profile.server || id,
         dbType: AppSqlStore.getDbType(profile),
-        server: profile.server || '',
-        database: profile.database || '',
+        server: profile.server ? encryptText(profile.server) : '',
+        database: profile.database ? encryptText(profile.database) : '',
         authentication: profile.authentication || 'sql',
-        user: profile.user || '',
+        user: profile.user ? encryptText(profile.user) : '',
         password: profile.password ? encryptText(profile.password) : '',
-        port: profile.port || '',
+        port: profile.port ? encryptText(profile.port) : '',
         encrypt: profile.encrypt !== false,
         trustServerCertificate: profile.trustServerCertificate !== false
       };
@@ -826,13 +941,21 @@ export function registerIpcHandlers(mainWindow) {
       setSettingValue(db, 'app_db_profiles', JSON.stringify(nextProfiles), 'string');
       const nextActive = payload?.setActive ? id : state.activeProfileId || id;
       setSettingValue(db, 'active_app_db_profile_id', nextActive, 'string');
+      queueSettingsSync();
       if (nextActive) {
         // If local already has data → push all sessions to MySQL; otherwise pull from MySQL
         const pushed = queueAllLocalSessionsSync();
         if (!pushed) queueRemoteRestore().catch(() => {});
         scheduleRemoteRestore();
       }
-      const responseProfiles = nextProfiles.map((p) => ({ ...p, password: decryptText(p.password || '') }));
+      const responseProfiles = nextProfiles.map((p) => ({
+        ...p,
+        server: decryptText(p.server || ''),
+        database: decryptText(p.database || ''),
+        user: decryptText(p.user || ''),
+        port: decryptText(p.port || ''),
+        password: decryptText(p.password || '')
+      }));
       return {
         success: true,
         data: { id, profiles: responseProfiles, activeProfileId: nextActive },
@@ -852,12 +975,20 @@ export function registerIpcHandlers(mainWindow) {
       setSettingValue(db, 'app_db_profiles', JSON.stringify(nextProfiles), 'string');
       const nextActive = state.activeProfileId === id ? nextProfiles[0]?.id || '' : state.activeProfileId;
       setSettingValue(db, 'active_app_db_profile_id', nextActive, 'string');
+      queueSettingsSync();
       if (nextActive) {
         const pushed = queueAllLocalSessionsSync();
         if (!pushed) queueRemoteRestore().catch(() => {});
         scheduleRemoteRestore();
       }
-      const responseProfiles = nextProfiles.map((p) => ({ ...p, password: decryptText(p.password || '') }));
+      const responseProfiles = nextProfiles.map((p) => ({
+        ...p,
+        server: decryptText(p.server || ''),
+        database: decryptText(p.database || ''),
+        user: decryptText(p.user || ''),
+        port: decryptText(p.port || ''),
+        password: decryptText(p.password || '')
+      }));
       return { success: true, data: { profiles: responseProfiles, activeProfileId: nextActive }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -868,6 +999,7 @@ export function registerIpcHandlers(mainWindow) {
     try {
       const db = DatabaseManager.getDatabase();
       setSettingValue(db, 'active_app_db_profile_id', payload?.id || '', 'string');
+      queueSettingsSync();
       if (payload?.id) {
         const pushed = queueAllLocalSessionsSync();
         if (!pushed) queueRemoteRestore().catch(() => {});
@@ -1303,6 +1435,17 @@ export function registerIpcHandlers(mainWindow) {
         details: { filePath: result.filePath, count: result.count || 0, exportId: result.exportId || null },
         sessionId
       });
+      try {
+        await runAmeiseImport({ filePath: result.filePath, sessionId });
+      } catch (error) {
+        logEvent(db, {
+          level: 'error',
+          event: 'export.ameise',
+          message: 'Ameise import failed',
+          details: { error: error.message, filePath: result.filePath },
+          sessionId
+        });
+      }
       queueSessionSync(sessionId);
       return { success: true, data: result, error: null };
     } catch (error) {
@@ -1415,6 +1558,24 @@ export function registerIpcHandlers(mainWindow) {
            FROM app_logs
            ORDER BY datetime(created_at) DESC
            LIMIT 1000`
+        )
+        .all();
+      return { success: true, data: rows, error: null };
+    } catch (error) {
+      return { success: false, data: null, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ameise:getLogs', async () => {
+    try {
+      const db = DatabaseManager.getDatabase();
+      const rows = db
+        .prepare(
+          `SELECT id, level, event, message, details, session_id, created_at
+           FROM app_logs
+           WHERE event = 'export.ameise'
+           ORDER BY datetime(created_at) DESC
+           LIMIT 200`
         )
         .all();
       return { success: true, data: rows, error: null };

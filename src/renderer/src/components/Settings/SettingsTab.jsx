@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Switch, Select, Space, Input, Button, Tabs, message, Progress } from 'antd';
+import { Card, Switch, Select, Space, Input, Button, Tabs, message, Progress, Table } from 'antd';
 
 export default function SettingsTab({
   t,
@@ -38,7 +38,6 @@ ORDER BY
     server: '',
     database: '',
     authentication: 'sql',
-    port: '',
     user: '',
     password: '',
     encrypt: true,
@@ -73,6 +72,13 @@ ORDER BY
   const [kbImporting, setKbImporting] = useState(false);
   const [kbSummary, setKbSummary] = useState(null);
   const [kbProgress, setKbProgress] = useState(null);
+  const [ameiseEnabled, setAmeiseEnabled] = useState(false);
+  const [ameiseExePath, setAmeiseExePath] = useState('');
+  const [ameiseTemplate, setAmeiseTemplate] = useState('IMP1');
+  const [ameiseArchiveFolder, setAmeiseArchiveFolder] = useState('');
+  const [savingAmeise, setSavingAmeise] = useState(false);
+  const [ameiseLogs, setAmeiseLogs] = useState([]);
+  const [ameiseLogsLoading, setAmeiseLogsLoading] = useState(false);
 
   const [automationMode, setAutomationMode] = useState('manual');
   const [automationScheduleMode, setAutomationScheduleMode] = useState('days');
@@ -89,9 +95,10 @@ ORDER BY
 
   const loadSettings = async () => {
     try {
-      const [dbProfilesResult, appDbProfilesResult] = await Promise.all([
+      const [dbProfilesResult, appDbProfilesResult, settingsResult] = await Promise.all([
         window.api.getDbProfiles(),
-        window.api.getAppDbProfiles()
+        window.api.getAppDbProfiles(),
+        window.api.getSettings ? window.api.getSettings() : Promise.resolve({ success: false })
       ]);
       if (dbProfilesResult.success && dbProfilesResult.data) {
         const profiles = dbProfilesResult.data.profiles || [];
@@ -115,6 +122,13 @@ ORDER BY
           setAppDbForm((prev) => ({ ...prev, ...selected }));
         }
       }
+      if (settingsResult?.success && settingsResult.data) {
+        setAmeiseEnabled(settingsResult.data.ameise_enabled === true || settingsResult.data.ameise_enabled === 'true');
+        setAmeiseExePath(settingsResult.data.ameise_exe_path || '');
+        setAmeiseTemplate(settingsResult.data.ameise_template || 'IMP1');
+        setAmeiseArchiveFolder(settingsResult.data.ameise_archive_folder || '');
+      }
+      await loadAmeiseLogs();
       const agentStatusResult = await window.api.getDbAgentStatus();
       if (agentStatusResult.success && agentStatusResult.data) {
         setDbAgentStatus(agentStatusResult.data);
@@ -183,7 +197,6 @@ ORDER BY
         server: selected.server || '',
         database: selected.database || '',
         authentication: selected.authentication || 'sql',
-        port: selected.port || '',
         user: selected.user || '',
         password: selected.password || '',
         encrypt: Boolean(selected.encrypt),
@@ -201,7 +214,6 @@ ORDER BY
       server: '',
       database: '',
       authentication: 'sql',
-      port: '',
       user: '',
       password: '',
     encrypt: true,
@@ -530,6 +542,39 @@ ORDER BY
     }
   };
 
+  const handleSaveAmeise = async () => {
+    setSavingAmeise(true);
+    try {
+      await window.api.updateSetting({ key: 'ameise_enabled', value: Boolean(ameiseEnabled) });
+      await window.api.updateSetting({ key: 'ameise_exe_path', value: ameiseExePath.trim() });
+      await window.api.updateSetting({ key: 'ameise_template', value: ameiseTemplate.trim() || 'IMP1' });
+      await window.api.updateSetting({
+        key: 'ameise_archive_folder',
+        value: ameiseArchiveFolder.trim()
+      });
+      message.success('Ameise trigger settings saved');
+    } catch (error) {
+      message.error(error.message || 'Failed to save Ameise settings');
+    } finally {
+      setSavingAmeise(false);
+    }
+  };
+
+  const loadAmeiseLogs = async () => {
+    if (!window.api?.getAmeiseLogs) return;
+    setAmeiseLogsLoading(true);
+    try {
+      const result = await window.api.getAmeiseLogs();
+      if (result?.success) {
+        setAmeiseLogs(result.data || []);
+      }
+    } catch (error) {
+      message.error(error.message || 'Failed to load Ameise logs');
+    } finally {
+      setAmeiseLogsLoading(false);
+    }
+  };
+
   const handlePickKnowledgeBaseFile = async () => {
     const path = await window.api.openExcelDialog();
     if (path) setKbFilePath(path);
@@ -785,17 +830,6 @@ ORDER BY
                       />
                     </div>
                   </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
-                      {t('settings.dbPort')}
-                    </label>
-                    <Input
-                      value={dbForm.port}
-                      onChange={(e) => setDbForm({ ...dbForm, port: e.target.value })}
-                      placeholder="1433"
-                    />
-                  </div>
-
                   <div className="grid-two">
                     <div>
                       <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
@@ -1093,6 +1127,89 @@ ORDER BY
                   </Card>
                 ) : null}
               </Space>
+            )
+          },
+          {
+            key: 'ameise',
+            label: t('settings.tabAmeise'),
+            children: (
+              <Card title={t('settings.ameiseTitle')} variant="outlined">
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  <div className="grid-two">
+                    <div>
+                      <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
+                        {t('settings.ameiseEnabled')}
+                      </label>
+                      <Switch checked={ameiseEnabled} onChange={setAmeiseEnabled} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
+                        {t('settings.ameiseTemplate')}
+                      </label>
+                      <Input
+                        value={ameiseTemplate}
+                        onChange={(e) => setAmeiseTemplate(e.target.value)}
+                        placeholder="IMP1"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
+                      {t('settings.ameiseExe')}
+                    </label>
+                    <Input
+                      value={ameiseExePath}
+                      onChange={(e) => setAmeiseExePath(e.target.value)}
+                      placeholder="C:\\Program Files (x86)\\JTL-Software\\JTL-wawi-ameise.exe"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
+                      {t('settings.ameiseArchive')}
+                    </label>
+                    <Input
+                      value={ameiseArchiveFolder}
+                      onChange={(e) => setAmeiseArchiveFolder(e.target.value)}
+                      placeholder="C:\\Exports\\abgearbeitet"
+                    />
+                  </div>
+                  <div className="panel-subtext">{t('settings.ameiseHint')}</div>
+                  <Button type="primary" onClick={handleSaveAmeise} loading={savingAmeise}>
+                    {t('settings.ameiseSave')}
+                  </Button>
+                  <Space>
+                    <Button onClick={loadAmeiseLogs} loading={ameiseLogsLoading}>
+                      {t('settings.ameiseRefresh')}
+                    </Button>
+                  </Space>
+                  <Table
+                    size="small"
+                    bordered
+                    rowKey={(record) => record.id}
+                    dataSource={ameiseLogs}
+                    pagination={{ pageSize: 8 }}
+                    columns={[
+                      { title: t('settings.ameiseLogTime'), dataIndex: 'created_at', width: 170 },
+                      { title: t('settings.ameiseLogStatus'), dataIndex: 'level', width: 90 },
+                      {
+                        title: t('settings.ameiseLogFile'),
+                        dataIndex: 'details',
+                        width: 260,
+                        render: (value) => {
+                          if (!value) return '-';
+                          try {
+                            const parsed = JSON.parse(value);
+                            return parsed.filePath || parsed.movedTo || '-';
+                          } catch {
+                            return '-';
+                          }
+                        }
+                      },
+                      { title: t('settings.ameiseLogMessage'), dataIndex: 'message' }
+                    ]}
+                  />
+                </Space>
+              </Card>
             )
           }
         ]}

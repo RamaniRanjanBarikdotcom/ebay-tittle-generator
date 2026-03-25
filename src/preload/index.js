@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   getDashboardStats: () => ipcRenderer.invoke('data:getDashboardStats'),
   getHistory: () => ipcRenderer.invoke('data:getHistory'),
   getLogs: () => ipcRenderer.invoke('data:getLogs'),
+  getAmeiseLogs: () => ipcRenderer.invoke('ameise:getLogs'),
   resetSession: () => ipcRenderer.invoke('data:resetSession'),
   getDbProfiles: () => ipcRenderer.invoke('db:getProfiles'),
   saveDbProfile: (profile, setActive = true) =>

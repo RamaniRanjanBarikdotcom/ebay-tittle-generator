@@ -94,6 +94,7 @@ export const translations = {
       subtitle: 'Manage default language and UI preferences.',
       tabGeneral: 'General',
       tabDatabase: 'Database',
+      tabAmeise: 'Ameise',
       language: 'Language',
       appearance: 'Appearance',
       lightTheme: 'Light theme',
@@ -133,7 +134,19 @@ export const translations = {
       dbAgentDisconnected: 'Disconnected',
       dbAgentNoStatus: 'No agent status yet',
       dbAgentRefresh: 'Connect now',
-      dbAgentUpdateFailed: 'Failed to update SQL agent settings'
+      dbAgentUpdateFailed: 'Failed to update SQL agent settings',
+      ameiseTitle: 'Ameise Trigger',
+      ameiseEnabled: 'Enable trigger',
+      ameiseTemplate: 'Template name',
+      ameiseExe: 'Ameise executable',
+      ameiseArchive: 'Archive folder (optional)',
+      ameiseHint: 'When enabled, the latest exported CSV is imported via Ameise using the active DB profile.',
+      ameiseSave: 'Save Ameise settings',
+      ameiseRefresh: 'Refresh logs',
+      ameiseLogTime: 'Time',
+      ameiseLogStatus: 'Status',
+      ameiseLogFile: 'File',
+      ameiseLogMessage: 'Message'
     }
   },
   de: {
@@ -231,6 +244,7 @@ export const translations = {
       subtitle: 'Standardsprache und UI-Einstellungen verwalten.',
       tabGeneral: 'Allgemein',
       tabDatabase: 'Datenbank',
+      tabAmeise: 'Ameise',
       language: 'Sprache',
       appearance: 'Darstellung',
       lightTheme: 'Helles Design',
@@ -270,7 +284,19 @@ export const translations = {
       dbAgentDisconnected: 'Getrennt',
       dbAgentNoStatus: 'Noch kein Agent-Status',
       dbAgentRefresh: 'Jetzt verbinden',
-      dbAgentUpdateFailed: 'SQL-Agent-Einstellungen konnten nicht aktualisiert werden'
+      dbAgentUpdateFailed: 'SQL-Agent-Einstellungen konnten nicht aktualisiert werden',
+      ameiseTitle: 'Ameise-Trigger',
+      ameiseEnabled: 'Trigger aktivieren',
+      ameiseTemplate: 'Template-Name',
+      ameiseExe: 'Ameise-Programm',
+      ameiseArchive: 'Archivordner (optional)',
+      ameiseHint: 'Wenn aktiv, wird die neueste CSV per Ameise mit dem aktiven DB-Profil importiert.',
+      ameiseSave: 'Ameise-Einstellungen speichern',
+      ameiseRefresh: 'Logs aktualisieren',
+      ameiseLogTime: 'Zeit',
+      ameiseLogStatus: 'Status',
+      ameiseLogFile: 'Datei',
+      ameiseLogMessage: 'Meldung'
     }
   }
 };
