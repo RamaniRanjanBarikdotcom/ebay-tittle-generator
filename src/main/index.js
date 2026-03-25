@@ -73,8 +73,8 @@ let handlersRegistered = false;
 app.whenReady().then(() => {
   DatabaseManager.initialize()
     .then(() => {
-      // Keep history, but clear previous session data on app start
-      DatabaseManager.clearWorkingData();
+      // Keep previous session data so exports and price history remain consistent across restarts.
+      // Use "Reset Session" from the UI when you explicitly want a clean slate.
 
       // Create window (this starts loading asynchronously)
       mainWindow = createWindow();

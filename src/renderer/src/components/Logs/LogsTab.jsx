@@ -25,17 +25,19 @@ export default function LogsTab({ t, isAdmin }) {
   const [levelFilter, setLevelFilter] = useState([]);
   const [eventFilter, setEventFilter] = useState('');
   const [clearing, setClearing] = useState(false);
+  const [limit, setLimit] = useState(200);
+  const [detailsCache, setDetailsCache] = useState({});
 
   const loadLogs = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await window.api.getLogs();
+      const result = await window.api.getLogs({ limit, includeDetails: false });
       if (result.success) setRows(result.data || []);
       else message.error(result.error || 'Failed to load logs');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [limit]);
 
   useEffect(() => {
     loadLogs();
@@ -104,7 +106,7 @@ export default function LogsTab({ t, isAdmin }) {
     {
       title: 'Details',
       dataIndex: 'details',
-      render: renderDetails
+      render: (value, record) => renderDetails(detailsCache[record.id] ?? value)
     }
   ];
 
@@ -138,6 +140,12 @@ export default function LogsTab({ t, isAdmin }) {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={loadLogs}>
             Refresh
           </Button>
+          <Button
+            disabled={loading}
+            onClick={() => setLimit((prev) => Math.min(2000, prev + 200))}
+          >
+            Load more
+          </Button>
           {isAdmin && (
             <Popconfirm
               title="Clear all logs?"
@@ -162,8 +170,20 @@ export default function LogsTab({ t, isAdmin }) {
           pagination={{ pageSize: 100, showSizeChanger: true, pageSizeOptions: ['50', '100', '200', '500'] }}
           scroll={{ x: true, y: 520 }}
           expandable={{
-            expandedRowRender: (record) => renderDetails(record.details),
-            rowExpandable: (record) => Boolean(record.details)
+            expandedRowRender: (record) => renderDetails(detailsCache[record.id] ?? record.details),
+            rowExpandable: (record) => Boolean(detailsCache[record.id] ?? record.details),
+            onExpand: async (expanded, record) => {
+              if (!expanded) return;
+              if (detailsCache[record.id] !== undefined) return;
+              try {
+                const result = await window.api.getLogDetails(record.id);
+                if (result?.success) {
+                  setDetailsCache((prev) => ({ ...prev, [record.id]: result.data?.details ?? null }));
+                }
+              } catch {
+                // ignore
+              }
+            }
           }}
         />
       </Card>

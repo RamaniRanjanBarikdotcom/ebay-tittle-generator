@@ -32,10 +32,48 @@ export default class ExportRunner {
     }).length;
   }
 
+  static resolveSessionForExport(preferredSessionId) {
+    const db = DatabaseManager.getDatabase();
+    const hasTitles = (sid) => {
+      if (!sid) return false;
+      const row = db.prepare(
+        'SELECT 1 FROM generated_titles WHERE session_id IS ? LIMIT 1'
+      ).get(sid);
+      return Boolean(row);
+    };
+
+    if (preferredSessionId && hasTitles(preferredSessionId)) {
+      return { sessionId: preferredSessionId, source: 'current' };
+    }
+
+    const latest = db.prepare(
+      `SELECT session_id
+       FROM generated_titles
+       WHERE session_id IS NOT NULL AND session_id != ''
+       ORDER BY datetime(created_at) DESC
+       LIMIT 1`
+    ).get();
+    if (latest?.session_id) {
+      return { sessionId: latest.session_id, source: preferredSessionId ? 'fallback_latest' : 'latest' };
+    }
+
+    return { sessionId: preferredSessionId || null, source: 'none' };
+  }
+
   static assertHasExportableRows(sessionId) {
+    if (!sessionId) {
+      throw new Error('No session available for export');
+    }
     const count = this.getExportableCount(sessionId);
     if (!count) {
       throw new Error('No rows to export');
+    }
+    const db = DatabaseManager.getDatabase();
+    const hasTitles = db.prepare(
+      'SELECT COUNT(*) as c FROM generated_titles WHERE session_id IS ?'
+    ).get(sessionId)?.c || 0;
+    if (!hasTitles) {
+      throw new Error('No generated titles to export');
     }
   }
 
@@ -122,18 +160,19 @@ export default class ExportRunner {
     if (!filePath) {
       throw new Error('No file path provided');
     }
-    this.assertHasExportableRows(sessionId);
+    const resolved = this.resolveSessionForExport(sessionId);
+    this.assertHasExportableRows(resolved.sessionId);
 
     if (onProgress) {
       onProgress({ scope: 'export', percent: 10, message: 'Writing Excel file' });
     }
 
-    const result = await ExcelExporter.exportGeneratedTitles(filePath, language, sessionId);
+    const result = await ExcelExporter.exportGeneratedTitles(filePath, language, resolved.sessionId);
     this.recordHistory({
       destination: 'excel',
       exportFilename: filePath,
       language,
-      sessionId,
+      sessionId: resolved.sessionId,
       metadata: { format: 'xlsx', count: result.count || 0 }
     });
 
@@ -141,11 +180,12 @@ export default class ExportRunner {
       onProgress({ scope: 'export', percent: 100, message: 'Export complete' });
     }
 
-    return result;
+    return { ...result, sessionId: resolved.sessionId, sessionSource: resolved.source };
   }
 
   static async exportCsvToStorage({ language = 'de', sessionId, onProgress, directProductCsv = false }) {
-    this.assertHasExportableRows(sessionId);
+    const resolved = this.resolveSessionForExport(sessionId);
+    this.assertHasExportableRows(resolved.sessionId);
 
     if (onProgress) {
       onProgress({ scope: 'export', percent: 10, message: 'Preparing CSV export location' });
@@ -158,8 +198,8 @@ export default class ExportRunner {
     }
 
     const { csvContent, count } = directProductCsv
-      ? CsvExporter.buildDirectSessionCsvContent(language, sessionId)
-      : CsvExporter.buildCsvContent(language, sessionId);
+      ? CsvExporter.buildDirectSessionCsvContent(language, resolved.sessionId)
+      : CsvExporter.buildCsvContent(language, resolved.sessionId);
 
     if (onProgress) {
       onProgress({ scope: 'export', percent: 70, message: 'Saving CSV file and archiving in database' });
@@ -167,7 +207,7 @@ export default class ExportRunner {
 
     await fs.writeFile(filePath, `\uFEFF${csvContent}`, 'utf8');
     const exportId = this.saveCsvInDatabase({
-      sessionId,
+      sessionId: resolved.sessionId,
       language,
       folderPath,
       fileName,
@@ -180,7 +220,7 @@ export default class ExportRunner {
       destination: 'csv',
       exportFilename: filePath,
       language,
-      sessionId,
+      sessionId: resolved.sessionId,
       metadata: {
         format: 'csv',
         count,
@@ -201,7 +241,9 @@ export default class ExportRunner {
       filePath,
       folderPath,
       fileName,
-      count
+      count,
+      sessionId: resolved.sessionId,
+      sessionSource: resolved.source
     };
   }
 }

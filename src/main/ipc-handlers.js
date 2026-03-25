@@ -169,6 +169,7 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.removeHandler('data:getDashboardStats');
   ipcMain.removeHandler('data:getHistory');
   ipcMain.removeHandler('data:getLogs');
+  ipcMain.removeHandler('data:getLogDetails');
   ipcMain.removeHandler('data:resetSession');
   ipcMain.removeHandler('data:importKnowledgeBase');
   ipcMain.removeHandler('db:getProfiles');
@@ -576,33 +577,71 @@ export function registerIpcHandlers(mainWindow) {
     setSettingValue(db, 'active_db_profile_id', activeProfileId || '', 'string');
   };
 
-  const pendingSyncSessions = new Set();
-  const queueSessionSync = (sessionId) => {
-    if (!sessionId || pendingSyncSessions.has(sessionId)) return;
-    pendingSyncSessions.add(sessionId);
-    setTimeout(async () => {
-      try {
-        await AppSqlStore.syncSession(sessionId);
-      } catch (error) {
-        console.error('[AppSqlSync] Failed:', error.message);
-      } finally {
-        pendingSyncSessions.delete(sessionId);
+  const dirtySessions = new Set();
+  let sessionSyncInFlight = false;
+  let sessionRetryTimer = null;
+  const scheduleSessionRetry = () => {
+    if (sessionRetryTimer) return;
+    sessionRetryTimer = setTimeout(async () => {
+      sessionRetryTimer = null;
+      await flushSessionSync();
+    }, 60 * 1000);
+  };
+  const flushSessionSync = async () => {
+    if (sessionSyncInFlight || dirtySessions.size === 0) return;
+    sessionSyncInFlight = true;
+    try {
+      const sessions = Array.from(dirtySessions);
+      for (const sessionId of sessions) {
+        try {
+          const result = await AppSqlStore.syncSession(sessionId);
+          if (result?.synced) {
+            dirtySessions.delete(sessionId);
+          }
+        } catch (error) {
+          console.error('[AppSqlSync] Failed:', error.message);
+        }
       }
-    }, 0);
+    } finally {
+      sessionSyncInFlight = false;
+    }
+    if (dirtySessions.size > 0) scheduleSessionRetry();
+  };
+  const queueSessionSync = (sessionId) => {
+    if (!sessionId) return;
+    dirtySessions.add(sessionId);
+    setTimeout(flushSessionSync, 0);
   };
 
-  let settingsSyncTimer = null;
+  let settingsDirty = false;
+  let settingsSyncInFlight = false;
+  let settingsRetryTimer = null;
+  const scheduleSettingsRetry = () => {
+    if (settingsRetryTimer) return;
+    settingsRetryTimer = setTimeout(async () => {
+      settingsRetryTimer = null;
+      await flushSettingsSync();
+    }, 60 * 1000);
+  };
+  const flushSettingsSync = async () => {
+    if (settingsSyncInFlight || !settingsDirty) return;
+    settingsSyncInFlight = true;
+    try {
+      const profile = AppSqlStore.getActiveProfile();
+      if (!profile || !String(profile.server || '').trim()) return;
+      const result = await AppSqlStore.syncSettings();
+      if (result?.synced) settingsDirty = false;
+    } catch (error) {
+      console.error('[AppSqlSync] settings sync failed:', error.message);
+      settingsDirty = true;
+      scheduleSettingsRetry();
+    } finally {
+      settingsSyncInFlight = false;
+    }
+  };
   queueSettingsSync = () => {
-    if (settingsSyncTimer) clearTimeout(settingsSyncTimer);
-    settingsSyncTimer = setTimeout(async () => {
-      try {
-        const profile = AppSqlStore.getActiveProfile();
-        if (!profile || !String(profile.server || '').trim()) return;
-        await AppSqlStore.syncSettings();
-      } catch (error) {
-        console.error('[AppSqlSync] settings sync failed:', error.message);
-      }
-    }, 200);
+    settingsDirty = true;
+    setTimeout(flushSettingsSync, 0);
   };
 
   // Push all local sessions to MySQL — used when a profile is first configured on a system with existing data
@@ -615,8 +654,9 @@ export function registerIpcHandlers(mainWindow) {
           .prepare("SELECT DISTINCT session_id FROM products WHERE session_id IS NOT NULL AND session_id != ''")
           .all();
         for (const { session_id } of sessions) {
-          queueSessionSync(session_id);
+          dirtySessions.add(session_id);
         }
+        setTimeout(flushSessionSync, 0);
         console.log(`[AppSqlSync] Queued ${sessions.length} local session(s) for push to App DB`);
         return true;
       }
@@ -636,22 +676,83 @@ export function registerIpcHandlers(mainWindow) {
         const primaryMode = ensurePrimaryAppDbSetting(db);
         const profile = getActiveAppDbProfile();
         const isPrimaryMysql = primaryMode === 'mysql' && profile && AppSqlStore.getDbType(profile) === 'mysql';
-        const force = Boolean(options?.force) || isPrimaryMysql;
-        const result = await AppSqlStore.restoreFromRemote({ ...options, force });
-        if (result?.synced) {
-          console.log('[AppSqlSync] Restored local data from App DB', result.counts || {});
-        } else if (isPrimaryMysql && result?.reason === 'No remote app data found') {
+        const force = Boolean(options?.force);
+        if (!profile || !String(profile.server || '').trim()) {
+          return { synced: false, reason: 'No active app SQL profile' };
+        }
+
+        // If we have pending local changes, push them first before any restore.
+        await flushSettingsSync();
+        await flushSessionSync();
+        if (dirtySessions.size > 0 || settingsDirty) {
+          return { synced: false, reason: 'Local changes pending (offline). Retry later.' };
+        }
+
+        if (force) {
+          const result = await AppSqlStore.restoreFromRemote({ ...options, force: true });
+          if (result?.synced) {
+            console.log('[AppSqlSync] Restored local data from App DB', result.counts || {});
+          }
+          return result;
+        }
+
+        const localState = AppSqlStore.getLocalSyncState();
+        const remoteState = await AppSqlStore.getRemoteSyncState(profile);
+
+        if (!remoteState?.hasAnyData && localState?.hasAnyData) {
           const pushed = queueAllLocalSessionsSync();
           try {
             await AppSqlStore.syncKnowledgeBase();
           } catch (error) {
             console.error('[AppSqlSync] Knowledge base sync failed:', error.message);
           }
+          await flushSettingsSync();
+          await flushSessionSync();
           if (pushed) {
             console.log('[AppSqlSync] Remote empty; pushed local data to App DB');
           }
+          return { synced: true, direction: 'push_local', local: localState, remote: remoteState };
         }
-        return result;
+
+        if (remoteState?.hasAnyData && !localState?.hasAnyData) {
+          const result = await AppSqlStore.restoreFromRemote({ force: true });
+          if (result?.synced) {
+            console.log('[AppSqlSync] Restored local data from App DB', result.counts || {});
+          }
+          return result;
+        }
+
+        if (!remoteState?.hasAnyData && !localState?.hasAnyData) {
+          return { synced: false, reason: 'No data to sync' };
+        }
+
+        const localTs = localState?.latestTimestamp ? new Date(localState.latestTimestamp).getTime() : 0;
+        const remoteTs = remoteState?.latestTimestamp ? new Date(remoteState.latestTimestamp).getTime() : 0;
+
+        if (localTs > remoteTs) {
+          const pushed = queueAllLocalSessionsSync();
+          try {
+            await AppSqlStore.syncKnowledgeBase();
+          } catch (error) {
+            console.error('[AppSqlSync] Knowledge base sync failed:', error.message);
+          }
+          await flushSettingsSync();
+          await flushSessionSync();
+          if (pushed) {
+            console.log('[AppSqlSync] Local newer; pushed data to App DB');
+          }
+          return { synced: true, direction: 'push_local', local: localState, remote: remoteState };
+        }
+
+        if (remoteTs > localTs) {
+          const result = await AppSqlStore.restoreFromRemote({ force: true });
+          if (result?.synced) {
+            console.log('[AppSqlSync] Remote newer; restored local data from App DB', result.counts || {});
+          }
+          return result;
+        }
+
+        return { synced: true, direction: 'noop', local: localState, remote: remoteState };
       } catch (error) {
         console.error('[AppSqlSync] Restore failed:', error.message);
         return { synced: false, reason: error.message };
@@ -669,7 +770,7 @@ export function registerIpcHandlers(mainWindow) {
     }
     if (!isPrimaryMysqlActive()) return;
     remoteRestoreTimer = setInterval(() => {
-      queueRemoteRestore({ force: true }).catch(() => {});
+      queueRemoteRestore().catch(() => {});
     }, 5 * 60 * 1000);
   };
 
@@ -1578,13 +1679,14 @@ export function registerIpcHandlers(mainWindow) {
         sessionId,
         onProgress: sendProgress
       });
+      const usedSessionId = result.sessionId || sessionId;
       logEvent(db, {
         event: 'export.excel',
         message: 'Excel export completed',
         details: { filePath, count: result.count || 0 },
-        sessionId
+        sessionId: usedSessionId
       });
-      queueSessionSync(sessionId);
+      if (usedSessionId) queueSessionSync(usedSessionId);
       return { success: true, data: result, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1601,24 +1703,25 @@ export function registerIpcHandlers(mainWindow) {
         sessionId,
         onProgress: sendProgress
       });
+      const usedSessionId = result.sessionId || sessionId;
       logEvent(db, {
         event: 'export.csv',
         message: 'CSV export completed',
         details: { filePath: result.filePath, count: result.count || 0, exportId: result.exportId || null },
-        sessionId
+        sessionId: usedSessionId
       });
       try {
-        await runAmeiseImport({ filePath: result.filePath, sessionId });
+        await runAmeiseImport({ filePath: result.filePath, sessionId: usedSessionId });
       } catch (error) {
         logEvent(db, {
           level: 'error',
           event: 'export.ameise',
           message: 'Ameise import failed',
           details: { error: error.message, filePath: result.filePath },
-          sessionId
+          sessionId: usedSessionId
         });
       }
-      queueSessionSync(sessionId);
+      if (usedSessionId) queueSessionSync(usedSessionId);
       return { success: true, data: result, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1721,23 +1824,26 @@ export function registerIpcHandlers(mainWindow) {
     }
   });
 
-  ipcMain.handle('data:getLogs', async () => {
+  ipcMain.handle('data:getLogs', async (_event, payload) => {
     try {
+      const limit = Math.min(2000, Math.max(50, Number(payload?.limit) || 200));
+      const includeDetails = Boolean(payload?.includeDetails);
       if (isPrimaryMysqlActive()) {
         const profile = AppSqlStore.getActiveProfile();
         if (profile) {
           const rows = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
             if (dialect === 'mysql') {
               const [result] = await conn.query(
-                `SELECT id, level, event, message, details, session_id, created_at
+                `SELECT id, level, event, message, ${includeDetails ? 'details' : 'NULL AS details'}, session_id, created_at
                  FROM app_logs
                  ORDER BY created_at DESC
-                 LIMIT 1000`
+                 LIMIT ?`,
+                [limit]
               );
               return result || [];
             }
             const result = await pool.request().query(
-              `SELECT TOP 1000 id, level, event, message, details, session_id, created_at
+              `SELECT TOP ${limit} id, level, event, message, ${includeDetails ? 'details' : 'CAST(NULL AS NVARCHAR(MAX)) AS details'}, session_id, created_at
                FROM dbo.app_logs
                ORDER BY created_at DESC`
             );
@@ -1749,13 +1855,41 @@ export function registerIpcHandlers(mainWindow) {
       const db = DatabaseManager.getDatabase();
       const rows = db
         .prepare(
-          `SELECT id, level, event, message, details, session_id, created_at
+          `SELECT id, level, event, message, ${includeDetails ? 'details' : 'NULL AS details'} AS details, session_id, created_at
            FROM app_logs
            ORDER BY datetime(created_at) DESC
-           LIMIT 1000`
+           LIMIT ?`
         )
-        .all();
+        .all(limit);
       return { success: true, data: rows, error: null };
+    } catch (error) {
+      return { success: false, data: null, error: error.message };
+    }
+  });
+
+  ipcMain.handle('data:getLogDetails', async (_event, payload) => {
+    try {
+      const id = Number(payload?.id);
+      if (!Number.isFinite(id)) return { success: false, data: null, error: 'Invalid log id' };
+      if (isPrimaryMysqlActive()) {
+        const profile = AppSqlStore.getActiveProfile();
+        if (profile) {
+          const details = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
+            if (dialect === 'mysql') {
+              const [rows] = await conn.query('SELECT details FROM app_logs WHERE id = ? LIMIT 1', [id]);
+              return rows?.[0]?.details ?? null;
+            }
+            const result = await pool.request().query(
+              `SELECT TOP 1 details FROM dbo.app_logs WHERE id = ${id}`
+            );
+            return result.recordset?.[0]?.details ?? null;
+          });
+          return { success: true, data: { id, details }, error: null };
+        }
+      }
+      const db = DatabaseManager.getDatabase();
+      const row = db.prepare('SELECT details FROM app_logs WHERE id = ?').get(id);
+      return { success: true, data: { id, details: row?.details ?? null }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
     }

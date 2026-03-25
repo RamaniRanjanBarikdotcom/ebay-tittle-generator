@@ -186,6 +186,7 @@ CREATE INDEX IF NOT EXISTS idx_history_product ON title_history(product_id);
 CREATE INDEX IF NOT EXISTS idx_history_action ON title_history(action);
 CREATE INDEX IF NOT EXISTS idx_history_date ON title_history(created_at);
 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_app_logs_event_created_at ON app_logs(event, created_at);
 CREATE INDEX IF NOT EXISTS idx_csv_exports_session ON csv_exports(session_id);
 CREATE INDEX IF NOT EXISTS idx_csv_exports_created_at ON csv_exports(created_at);
 CREATE INDEX IF NOT EXISTS idx_extracted_elements_sku ON extracted_elements(sku);

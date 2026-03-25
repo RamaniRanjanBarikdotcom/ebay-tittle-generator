@@ -440,6 +440,9 @@ export default class AppSqlStore {
             INDEX ix_app_price_history_sku (sku)
           ) ENGINE=InnoDB;
 
+          CREATE INDEX IF NOT EXISTS ix_app_logs_created_at ON app_logs(created_at);
+          CREATE INDEX IF NOT EXISTS ix_app_logs_event_created_at ON app_logs(event, created_at);
+
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS sku VARCHAR(255) NULL;
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS item_number VARCHAR(255) NULL;
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS model_rotation VARCHAR(255) NULL;
@@ -655,6 +658,14 @@ export default class AppSqlStore {
           );
           CREATE INDEX IX_app_price_history_sku ON dbo.app_price_history(sku);
         END;
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_app_logs_created_at' AND object_id = OBJECT_ID('dbo.app_logs'))
+        BEGIN
+          CREATE INDEX IX_app_logs_created_at ON dbo.app_logs(created_at);
+        END;
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_app_logs_event_created_at' AND object_id = OBJECT_ID('dbo.app_logs'))
+        BEGIN
+          CREATE INDEX IX_app_logs_event_created_at ON dbo.app_logs(event, created_at);
+        END;
         IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.app_generated_titles') AND name = 'sku')
           ALTER TABLE dbo.app_generated_titles ADD sku NVARCHAR(255) NULL;
         IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.app_generated_titles') AND name = 'item_number')
@@ -730,6 +741,171 @@ export default class AppSqlStore {
     db.exec('CREATE INDEX IF NOT EXISTS idx_title_kb_source ON title_knowledge_base(source)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_title_kb_sku ON title_knowledge_base(sku)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_title_kb_item ON title_knowledge_base(item_number)');
+  }
+
+  static getLocalSyncState() {
+    const db = DatabaseManager.getDatabase();
+    const has = (table) => this.hasLocalTable(db, table);
+    const count = (table) => (has(table) ? db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get()?.c || 0 : 0);
+    const max = (table, column) =>
+      has(table) ? db.prepare(`SELECT MAX(${column}) as m FROM ${table}`).get()?.m || null : null;
+
+    const counts = {
+      products: count('products'),
+      titles: count('generated_titles'),
+      history: count('title_history'),
+      csv: count('csv_exports'),
+      logs: count('app_logs'),
+      settings: count('app_settings'),
+      knowledgeBase: count('title_knowledge_base'),
+      extractedElements: count('extracted_elements'),
+      skuImportCounts: count('sku_import_counts'),
+      priceHistory: count('price_history')
+    };
+
+    const timestamps = [
+      max('products', 'updated_at'),
+      max('generated_titles', 'created_at'),
+      max('title_history', 'created_at'),
+      max('csv_exports', 'created_at'),
+      max('app_logs', 'created_at'),
+      max('title_knowledge_base', 'updated_at'),
+      max('extracted_elements', 'extracted_at'),
+      max('sku_import_counts', 'last_imported_at'),
+      max('price_history', 'recorded_at')
+    ];
+
+    const latestMs = timestamps
+      .map((t) => (t ? new Date(t).getTime() : NaN))
+      .filter((n) => Number.isFinite(n))
+      .reduce((acc, n) => Math.max(acc, n), 0);
+
+    return {
+      counts,
+      hasAnyData: Object.values(counts).some((v) => v > 0),
+      latestTimestamp: latestMs ? new Date(latestMs).toISOString() : null
+    };
+  }
+
+  static async getRemoteSyncState(profile) {
+    await this.ensureSchema(profile);
+    return this.withClient(profile, async ({ dialect, pool, conn }) => {
+      if (dialect === 'mysql') {
+        const [rows] = await conn.query(`
+          SELECT
+            (SELECT COUNT(*) FROM app_products) AS products,
+            (SELECT COUNT(*) FROM app_generated_titles) AS titles,
+            (SELECT COUNT(*) FROM app_title_history) AS history,
+            (SELECT COUNT(*) FROM app_csv_exports) AS csv,
+            (SELECT COUNT(*) FROM app_logs) AS logs,
+            (SELECT COUNT(*) FROM app_settings) AS settings,
+            (SELECT COUNT(*) FROM app_title_knowledge_base) AS knowledgeBase,
+            (SELECT COUNT(*) FROM app_extracted_elements) AS extractedElements,
+            (SELECT COUNT(*) FROM app_sku_import_counts) AS skuImportCounts,
+            (SELECT COUNT(*) FROM app_price_history) AS priceHistory,
+            (SELECT MAX(updated_at) FROM app_products) AS products_updated,
+            (SELECT MAX(created_at) FROM app_generated_titles) AS titles_created,
+            (SELECT MAX(created_at) FROM app_title_history) AS history_created,
+            (SELECT MAX(created_at) FROM app_csv_exports) AS csv_created,
+            (SELECT MAX(created_at) FROM app_logs) AS logs_created,
+            (SELECT MAX(updated_at) FROM app_title_knowledge_base) AS kb_updated,
+            (SELECT MAX(extracted_at) FROM app_extracted_elements) AS extracted_updated,
+            (SELECT MAX(last_imported_at) FROM app_sku_import_counts) AS sku_imported,
+            (SELECT MAX(recorded_at) FROM app_price_history) AS price_recorded
+        `);
+        const row = rows?.[0] || {};
+        const counts = {
+          products: Number(row.products || 0),
+          titles: Number(row.titles || 0),
+          history: Number(row.history || 0),
+          csv: Number(row.csv || 0),
+          logs: Number(row.logs || 0),
+          settings: Number(row.settings || 0),
+          knowledgeBase: Number(row.knowledgeBase || 0),
+          extractedElements: Number(row.extractedElements || 0),
+          skuImportCounts: Number(row.skuImportCounts || 0),
+          priceHistory: Number(row.priceHistory || 0)
+        };
+        const timestamps = [
+          row.products_updated,
+          row.titles_created,
+          row.history_created,
+          row.csv_created,
+          row.logs_created,
+          row.kb_updated,
+          row.extracted_updated,
+          row.sku_imported,
+          row.price_recorded
+        ];
+        const latestMs = timestamps
+          .map((t) => (t ? new Date(t).getTime() : NaN))
+          .filter((n) => Number.isFinite(n))
+          .reduce((acc, n) => Math.max(acc, n), 0);
+
+        return {
+          counts,
+          hasAnyData: Object.values(counts).some((v) => v > 0),
+          latestTimestamp: latestMs ? new Date(latestMs).toISOString() : null
+        };
+      }
+
+      const result = await pool.request().query(`
+        SELECT
+          (SELECT COUNT(*) FROM dbo.app_products) AS products,
+          (SELECT COUNT(*) FROM dbo.app_generated_titles) AS titles,
+          (SELECT COUNT(*) FROM dbo.app_title_history) AS history,
+          (SELECT COUNT(*) FROM dbo.app_csv_exports) AS csv,
+          (SELECT COUNT(*) FROM dbo.app_logs) AS logs,
+          (SELECT COUNT(*) FROM dbo.app_settings) AS settings,
+          (SELECT COUNT(*) FROM dbo.app_title_knowledge_base) AS knowledgeBase,
+          (SELECT COUNT(*) FROM dbo.app_extracted_elements) AS extractedElements,
+          (SELECT COUNT(*) FROM dbo.app_sku_import_counts) AS skuImportCounts,
+          (SELECT COUNT(*) FROM dbo.app_price_history) AS priceHistory,
+          (SELECT MAX(updated_at) FROM dbo.app_products) AS products_updated,
+          (SELECT MAX(created_at) FROM dbo.app_generated_titles) AS titles_created,
+          (SELECT MAX(created_at) FROM dbo.app_title_history) AS history_created,
+          (SELECT MAX(created_at) FROM dbo.app_csv_exports) AS csv_created,
+          (SELECT MAX(created_at) FROM dbo.app_logs) AS logs_created,
+          (SELECT MAX(updated_at) FROM dbo.app_title_knowledge_base) AS kb_updated,
+          (SELECT MAX(extracted_at) FROM dbo.app_extracted_elements) AS extracted_updated,
+          (SELECT MAX(last_imported_at) FROM dbo.app_sku_import_counts) AS sku_imported,
+          (SELECT MAX(recorded_at) FROM dbo.app_price_history) AS price_recorded
+      `);
+      const row = result.recordset?.[0] || {};
+      const counts = {
+        products: Number(row.products || 0),
+        titles: Number(row.titles || 0),
+        history: Number(row.history || 0),
+        csv: Number(row.csv || 0),
+        logs: Number(row.logs || 0),
+        settings: Number(row.settings || 0),
+        knowledgeBase: Number(row.knowledgeBase || 0),
+        extractedElements: Number(row.extractedElements || 0),
+        skuImportCounts: Number(row.skuImportCounts || 0),
+        priceHistory: Number(row.priceHistory || 0)
+      };
+      const timestamps = [
+        row.products_updated,
+        row.titles_created,
+        row.history_created,
+        row.csv_created,
+        row.logs_created,
+        row.kb_updated,
+        row.extracted_updated,
+        row.sku_imported,
+        row.price_recorded
+      ];
+      const latestMs = timestamps
+        .map((t) => (t ? new Date(t).getTime() : NaN))
+        .filter((n) => Number.isFinite(n))
+        .reduce((acc, n) => Math.max(acc, n), 0);
+
+      return {
+        counts,
+        hasAnyData: Object.values(counts).some((v) => v > 0),
+        latestTimestamp: latestMs ? new Date(latestMs).toISOString() : null
+      };
+    });
   }
 
   static async restoreFromRemote(options = {}) {
