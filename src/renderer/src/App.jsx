@@ -75,18 +75,29 @@ export default function App() {
   useEffect(() => {
     const initAuth = async () => {
       const token = localStorage.getItem('auth_token') || '';
+      if (!window.api || typeof window.api.authVerify !== 'function') {
+        setAuth({ loading: false, token: '', user: null });
+        return;
+      }
       if (!token) {
         setAuth({ loading: false, token: '', user: null });
         return;
       }
-      const result = await window.api.authVerify(token);
-      if (!result.success) {
+      try {
+        const result = await window.api.authVerify(token);
+        if (!result.success) {
+          localStorage.removeItem('auth_token');
+          localStorage.removeItem('auth_user');
+          setAuth({ loading: false, token: '', user: null });
+          return;
+        }
+        setAuth({ loading: false, token, user: result.data });
+      } catch (error) {
         localStorage.removeItem('auth_token');
         localStorage.removeItem('auth_user');
         setAuth({ loading: false, token: '', user: null });
-        return;
+        console.error('Auth verify failed:', error);
       }
-      setAuth({ loading: false, token, user: result.data });
     };
     initAuth();
   }, []);
