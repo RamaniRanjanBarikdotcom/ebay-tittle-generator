@@ -211,6 +211,11 @@ export function registerIpcHandlers(mainWindow) {
       mainWindow.webContents.send('progress', payload);
     }
   };
+  const sendAmeiseStatus = (payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('ameise-status', payload);
+    }
+  };
   const sendDbAgentStatus = (payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('db-agent-status', payload);
@@ -290,6 +295,21 @@ export function registerIpcHandlers(mainWindow) {
     archiveFolder: getSettingValue(db, 'ameise_archive_folder', '')
   });
 
+  let ameiseState = {
+    running: false,
+    status: 'idle',
+    startedAt: null,
+    finishedAt: null,
+    filePath: null,
+    movedTo: null,
+    message: ''
+  };
+  let ameiseChild = null;
+  const updateAmeiseState = (patch) => {
+    ameiseState = { ...ameiseState, ...patch };
+    sendAmeiseStatus({ ...ameiseState });
+  };
+
   const runAmeiseImport = async ({ filePath, sessionId }) => {
     const db = DatabaseManager.getDatabase();
     const settings = getAmeiseSettings(db);
@@ -300,6 +320,9 @@ export function registerIpcHandlers(mainWindow) {
     }
     if (!filePath || !existsSync(filePath)) {
       return { skipped: true, reason: 'missing_csv' };
+    }
+    if (ameiseState.running) {
+      return { skipped: true, reason: 'already_running' };
     }
 
     const { profiles, activeProfileId } = getJtlDbProfilesState(db);
@@ -324,18 +347,78 @@ export function registerIpcHandlers(mainWindow) {
       filePath
     ];
 
-    const result = await new Promise((resolve, reject) => {
+    const startedAt = new Date().toISOString();
+    updateAmeiseState({
+      running: true,
+      status: 'running',
+      startedAt,
+      finishedAt: null,
+      filePath,
+      movedTo: null,
+      message: 'Ameise import started'
+    });
+    logEvent(db, {
+      event: 'export.ameise',
+      message: 'Ameise import started',
+      details: { filePath, template: settings.template },
+      sessionId
+    });
+
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
       const child = spawn(settings.exePath, args, { windowsHide: true });
+      ameiseChild = child;
       let stderr = '';
+      let stdout = '';
       child.stderr.on('data', (chunk) => {
         stderr += chunk.toString();
       });
+      child.stdout?.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      const timeoutMs = 60 * 60 * 1000; // 60 minutes
+      const timeout = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {}
+        reject(new Error('Ameise timed out'));
+      }, timeoutMs);
       child.on('error', reject);
       child.on('exit', (code) => {
-        if (code === 0) return resolve({ code });
-        return reject(new Error(stderr || `Ameise exited with code ${code}`));
+        clearTimeout(timeout);
+        if (code === 0) return resolve({ code, stdout, stderr });
+        const err = new Error(stderr || stdout || `Ameise exited with code ${code}`);
+        err.exitCode = code;
+        err.stderr = stderr;
+        err.stdout = stdout;
+        return reject(err);
       });
-    });
+      });
+    } catch (error) {
+      logEvent(db, {
+        level: 'error',
+        event: 'export.ameise',
+        message: 'Ameise import failed',
+        details: {
+          filePath,
+          template: settings.template,
+          error: error.message,
+          exitCode: error.exitCode,
+          stderr: error.stderr,
+          stdout: error.stdout
+        },
+        sessionId
+      });
+      updateAmeiseState({
+        running: false,
+        status: 'error',
+        finishedAt: new Date().toISOString(),
+        message: error.message || 'Ameise import failed'
+      });
+      ameiseChild = null;
+      throw error;
+    }
 
     let movedTo = null;
     const archiveRoot = settings.archiveFolder
@@ -361,6 +444,14 @@ export function registerIpcHandlers(mainWindow) {
       details: { filePath, movedTo, template: settings.template },
       sessionId
     });
+    updateAmeiseState({
+      running: false,
+      status: 'success',
+      finishedAt: new Date().toISOString(),
+      movedTo,
+      message: 'Ameise import completed'
+    });
+    ameiseChild = null;
 
     return { success: true, movedTo, code: result.code || 0 };
   };
@@ -1647,6 +1738,29 @@ export function registerIpcHandlers(mainWindow) {
         )
         .all();
       return { success: true, data: rows, error: null };
+    } catch (error) {
+      return { success: false, data: null, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ameise:getStatus', async () => {
+    return { success: true, data: { ...ameiseState }, error: null };
+  });
+
+  ipcMain.handle('ameise:cancel', async () => {
+    if (!ameiseState.running || !ameiseChild) {
+      return { success: false, data: null, error: 'No Ameise process running' };
+    }
+    try {
+      ameiseChild.kill();
+      updateAmeiseState({
+        running: false,
+        status: 'cancelled',
+        finishedAt: new Date().toISOString(),
+        message: 'Ameise import cancelled'
+      });
+      ameiseChild = null;
+      return { success: true, data: true, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
     }

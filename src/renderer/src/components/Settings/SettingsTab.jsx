@@ -80,6 +80,8 @@ ORDER BY
   const [ameiseLogs, setAmeiseLogs] = useState([]);
   const [ameiseLogsLoading, setAmeiseLogsLoading] = useState(false);
   const [ameiseRunLoading, setAmeiseRunLoading] = useState(false);
+  const [ameiseStatus, setAmeiseStatus] = useState(null);
+  const [ameiseElapsed, setAmeiseElapsed] = useState('');
 
   const [automationMode, setAutomationMode] = useState('manual');
   const [automationScheduleMode, setAutomationScheduleMode] = useState('days');
@@ -93,6 +95,39 @@ ORDER BY
   useEffect(() => {
     loadSettings();
   }, []);
+
+  useEffect(() => {
+    let cleanup;
+    let timer;
+    const loadStatus = async () => {
+      if (!window.api?.getAmeiseStatus) return;
+      const result = await window.api.getAmeiseStatus();
+      if (result?.success) setAmeiseStatus(result.data);
+    };
+    loadStatus().catch(() => {});
+    if (window.api?.onAmeiseStatus) {
+      cleanup = window.api.onAmeiseStatus((status) => {
+        setAmeiseStatus(status);
+      });
+    }
+    timer = setInterval(() => {
+      setAmeiseElapsed((prev) => prev); // trigger re-render for elapsed calc
+    }, 1000);
+    return () => {
+      if (cleanup) cleanup();
+      if (timer) clearInterval(timer);
+    };
+  }, []);
+
+  const formatElapsed = (startedAt) => {
+    if (!startedAt) return '';
+    const start = new Date(startedAt).getTime();
+    if (!Number.isFinite(start)) return '';
+    const secs = Math.max(0, Math.floor((Date.now() - start) / 1000));
+    const m = Math.floor(secs / 60).toString().padStart(2, '0');
+    const s = Math.floor(secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
 
   const loadSettings = async () => {
     try {
@@ -615,6 +650,19 @@ ORDER BY
       await loadAmeiseLogs();
     } finally {
       setAmeiseRunLoading(false);
+    }
+  };
+
+  const handleCancelAmeise = async () => {
+    try {
+      const result = await window.api.cancelAmeise();
+      if (!result?.success) {
+        message.error(result?.error || t('settings.ameiseCancelFailed'));
+        return;
+      }
+      message.success(t('settings.ameiseCancelSuccess'));
+    } catch (error) {
+      message.error(error.message || t('settings.ameiseCancelFailed'));
     }
   };
 
@@ -1217,10 +1265,33 @@ ORDER BY
                     />
                   </div>
                   <div className="panel-subtext">{t('settings.ameiseHint')}</div>
+                  {ameiseStatus?.running ? (
+                    <div className="empty-state" style={{ textAlign: 'left' }}>
+                      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                        {t('settings.ameiseRunning')}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                        {ameiseStatus?.filePath ? `CSV: ${ameiseStatus.filePath}` : ''}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                        {ameiseStatus?.startedAt ? `Elapsed: ${formatElapsed(ameiseStatus.startedAt)}` : ''}
+                      </div>
+                      <Progress
+                        percent={Math.min(95, Math.max(5, Math.floor((Date.now() - new Date(ameiseStatus.startedAt || Date.now()).getTime()) / 1000)))}
+                        status="active"
+                        showInfo={false}
+                      />
+                    </div>
+                  ) : null}
                   <Button type="primary" onClick={handleSaveAmeise} loading={savingAmeise}>
                     {t('settings.ameiseSave')}
                   </Button>
                   <Space>
+                    {ameiseStatus?.running ? (
+                      <Button danger onClick={handleCancelAmeise}>
+                        {t('settings.ameiseCancel')}
+                      </Button>
+                    ) : null}
                     <Button onClick={handleRunAmeiseLatest} loading={ameiseRunLoading}>
                       {t('settings.ameiseRunLatest')}
                     </Button>

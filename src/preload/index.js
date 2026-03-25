@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('api', {
   getHistory: () => ipcRenderer.invoke('data:getHistory'),
   getLogs: () => ipcRenderer.invoke('data:getLogs'),
   getAmeiseLogs: () => ipcRenderer.invoke('ameise:getLogs'),
+  getAmeiseStatus: () => ipcRenderer.invoke('ameise:getStatus'),
+  cancelAmeise: () => ipcRenderer.invoke('ameise:cancel'),
   runAmeiseLatest: () => ipcRenderer.invoke('ameise:runLatest'),
   runAmeiseFile: (filePath) => ipcRenderer.invoke('ameise:runFile', { filePath }),
   resetSession: () => ipcRenderer.invoke('data:resetSession'),
@@ -77,5 +79,10 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_event, data) => handler(data);
     ipcRenderer.on('automation-status', listener);
     return () => ipcRenderer.removeListener('automation-status', listener);
+  },
+  onAmeiseStatus: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on('ameise-status', listener);
+    return () => ipcRenderer.removeListener('ameise-status', listener);
   }
 });
