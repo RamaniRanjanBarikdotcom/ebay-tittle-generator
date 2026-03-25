@@ -1723,6 +1723,29 @@ export function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('data:getLogs', async () => {
     try {
+      if (isPrimaryMysqlActive()) {
+        const profile = AppSqlStore.getActiveProfile();
+        if (profile) {
+          const rows = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
+            if (dialect === 'mysql') {
+              const [result] = await conn.query(
+                `SELECT id, level, event, message, details, session_id, created_at
+                 FROM app_logs
+                 ORDER BY created_at DESC
+                 LIMIT 1000`
+              );
+              return result || [];
+            }
+            const result = await pool.request().query(
+              `SELECT TOP 1000 id, level, event, message, details, session_id, created_at
+               FROM dbo.app_logs
+               ORDER BY created_at DESC`
+            );
+            return result.recordset || [];
+          });
+          return { success: true, data: rows, error: null };
+        }
+      }
       const db = DatabaseManager.getDatabase();
       const rows = db
         .prepare(
@@ -1740,6 +1763,31 @@ export function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('ameise:getLogs', async () => {
     try {
+      if (isPrimaryMysqlActive()) {
+        const profile = AppSqlStore.getActiveProfile();
+        if (profile) {
+          const rows = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
+            if (dialect === 'mysql') {
+              const [result] = await conn.query(
+                `SELECT id, level, event, message, details, session_id, created_at
+                 FROM app_logs
+                 WHERE event = 'export.ameise'
+                 ORDER BY created_at DESC
+                 LIMIT 200`
+              );
+              return result || [];
+            }
+            const result = await pool.request().query(
+              `SELECT TOP 200 id, level, event, message, details, session_id, created_at
+               FROM dbo.app_logs
+               WHERE event = 'export.ameise'
+               ORDER BY created_at DESC`
+            );
+            return result.recordset || [];
+          });
+          return { success: true, data: rows, error: null };
+        }
+      }
       const db = DatabaseManager.getDatabase();
       const rows = db
         .prepare(
