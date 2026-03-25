@@ -81,7 +81,7 @@ ORDER BY
   const [ameiseLogsLoading, setAmeiseLogsLoading] = useState(false);
   const [ameiseRunLoading, setAmeiseRunLoading] = useState(false);
   const [ameiseStatus, setAmeiseStatus] = useState(null);
-  const [ameiseElapsed, setAmeiseElapsed] = useState('');
+  const [ameiseTick, setAmeiseTick] = useState(0);
 
   const [automationMode, setAutomationMode] = useState('manual');
   const [automationScheduleMode, setAutomationScheduleMode] = useState('days');
@@ -111,7 +111,7 @@ ORDER BY
       });
     }
     timer = setInterval(() => {
-      setAmeiseElapsed((prev) => prev); // trigger re-render for elapsed calc
+      setAmeiseTick((v) => v + 1);
     }, 1000);
     return () => {
       if (cleanup) cleanup();
@@ -1276,8 +1276,22 @@ ORDER BY
                       <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                         {ameiseStatus?.startedAt ? `Elapsed: ${formatElapsed(ameiseStatus.startedAt)}` : ''}
                       </div>
+                      {ameiseStatus?.lastOutput ? (
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                          Last output: {ameiseStatus.lastOutput}
+                        </div>
+                      ) : null}
+                      {ameiseStatus?.lastOutputAt ? (
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                          Last output at: {new Date(ameiseStatus.lastOutputAt).toLocaleString()}
+                        </div>
+                      ) : null}
                       <Progress
-                        percent={Math.min(95, Math.max(5, Math.floor((Date.now() - new Date(ameiseStatus.startedAt || Date.now()).getTime()) / 1000)))}
+                        percent={
+                          ameiseStatus?.startedAt
+                            ? 10 + Math.floor(((Date.now() - new Date(ameiseStatus.startedAt).getTime()) / 1000) % 80)
+                            : 10
+                        }
                         status="active"
                         showInfo={false}
                       />
@@ -1309,7 +1323,17 @@ ORDER BY
                     dataSource={ameiseLogs}
                     pagination={{ pageSize: 8 }}
                     columns={[
-                      { title: t('settings.ameiseLogTime'), dataIndex: 'created_at', width: 170 },
+                      {
+                        title: t('settings.ameiseLogTime'),
+                        dataIndex: 'created_at',
+                        width: 170,
+                        render: (value) => {
+                          if (!value) return '-';
+                          const date = new Date(value);
+                          if (Number.isNaN(date.getTime())) return String(value);
+                          return date.toLocaleString();
+                        }
+                      },
                       { title: t('settings.ameiseLogStatus'), dataIndex: 'level', width: 90 },
                       {
                         title: t('settings.ameiseLogFile'),

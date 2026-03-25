@@ -304,7 +304,9 @@ export function registerIpcHandlers(mainWindow) {
     finishedAt: null,
     filePath: null,
     movedTo: null,
-    message: ''
+    message: '',
+    lastOutput: '',
+    lastOutputAt: null
   };
   let ameiseChild = null;
   const updateAmeiseState = (patch) => {
@@ -363,7 +365,9 @@ export function registerIpcHandlers(mainWindow) {
       finishedAt: null,
       filePath,
       movedTo: null,
-      message: 'Ameise import started'
+      message: 'Ameise import started',
+      lastOutput: '',
+      lastOutputAt: null
     });
     logEvent(db, {
       event: 'export.ameise',
@@ -375,34 +379,44 @@ export function registerIpcHandlers(mainWindow) {
     let result;
     try {
       result = await new Promise((resolve, reject) => {
-      const child = spawn(settings.exePath, args, { windowsHide: true });
-      ameiseChild = child;
-      let stderr = '';
-      let stdout = '';
-      child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString('latin1');
+        const child = spawn(settings.exePath, args, { windowsHide: true });
+        ameiseChild = child;
+        let stderr = '';
+        let stdout = '';
+        let lastEmit = 0;
+        const emitOutput = (raw) => {
+          const cleaned = fixMojibakeText(String(raw || '').trim());
+          if (!cleaned) return;
+          const now = Date.now();
+          if (now - lastEmit < 500) return;
+          lastEmit = now;
+          const lastLine = cleaned.split(/\r?\n/).filter(Boolean).slice(-1)[0] || cleaned;
+          updateAmeiseState({
+            message: lastLine.slice(0, 200),
+            lastOutput: lastLine.slice(0, 500),
+            lastOutputAt: new Date().toISOString()
+          });
+        };
+        child.stderr.on('data', (chunk) => {
+          const text = chunk.toString('latin1');
+          stderr += text;
+          emitOutput(text);
+        });
+        child.stdout?.on('data', (chunk) => {
+          const text = chunk.toString('latin1');
+          stdout += text;
+          emitOutput(text);
+        });
+        child.on('error', reject);
+        child.on('exit', (code) => {
+          if (code === 0) return resolve({ code, stdout, stderr });
+          const err = new Error(stderr || stdout || `Ameise exited with code ${code}`);
+          err.exitCode = code;
+          err.stderr = stderr;
+          err.stdout = stdout;
+          return reject(err);
+        });
       });
-      child.stdout?.on('data', (chunk) => {
-        stdout += chunk.toString('latin1');
-      });
-      const timeoutMs = 60 * 60 * 1000; // 60 minutes
-      const timeout = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {}
-        reject(new Error('Ameise timed out'));
-      }, timeoutMs);
-      child.on('error', reject);
-      child.on('exit', (code) => {
-        clearTimeout(timeout);
-        if (code === 0) return resolve({ code, stdout, stderr });
-        const err = new Error(stderr || stdout || `Ameise exited with code ${code}`);
-        err.exitCode = code;
-        err.stderr = stderr;
-        err.stdout = stdout;
-        return reject(err);
-      });
-    });
     } catch (error) {
       logEvent(db, {
         level: 'error',
