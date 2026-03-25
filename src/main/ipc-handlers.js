@@ -19,6 +19,7 @@ import RuleEngine from './title-engine/RuleEngine.js';
 import AppSqlStore from './services/AppSqlStore.js';
 import AuthService from './services/AuthService.js';
 import { encryptText, decryptText, encryptWithBaseKey, decryptWithBaseKey } from './utils/secureCrypto.js';
+import { fixMojibakeText } from './utils/textEncoding.js';
 import KnowledgeBaseImporter from './importers/KnowledgeBaseImporter.js';
 import KnowledgeBaseStore from './services/KnowledgeBaseStore.js';
 
@@ -310,6 +311,12 @@ export function registerIpcHandlers(mainWindow) {
     sendAmeiseStatus({ ...ameiseState });
   };
 
+  const trimLogText = (value, max = 12000) => {
+    if (!value) return '';
+    const cleaned = fixMojibakeText(value);
+    return cleaned.length > max ? `${cleaned.slice(0, max)}…` : cleaned;
+  };
+
   const runAmeiseImport = async ({ filePath, sessionId }) => {
     const db = DatabaseManager.getDatabase();
     const settings = getAmeiseSettings(db);
@@ -372,10 +379,10 @@ export function registerIpcHandlers(mainWindow) {
       let stderr = '';
       let stdout = '';
       child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString();
+        stderr += chunk.toString('latin1');
       });
       child.stdout?.on('data', (chunk) => {
-        stdout += chunk.toString();
+        stdout += chunk.toString('latin1');
       });
       const timeoutMs = 60 * 60 * 1000; // 60 minutes
       const timeout = setTimeout(() => {
@@ -394,7 +401,7 @@ export function registerIpcHandlers(mainWindow) {
         err.stdout = stdout;
         return reject(err);
       });
-      });
+    });
     } catch (error) {
       logEvent(db, {
         level: 'error',
@@ -405,8 +412,8 @@ export function registerIpcHandlers(mainWindow) {
           template: settings.template,
           error: error.message,
           exitCode: error.exitCode,
-          stderr: error.stderr,
-          stdout: error.stdout
+          stderr: trimLogText(error.stderr),
+          stdout: trimLogText(error.stdout)
         },
         sessionId
       });
@@ -441,7 +448,13 @@ export function registerIpcHandlers(mainWindow) {
     logEvent(db, {
       event: 'export.ameise',
       message: 'Ameise import completed',
-      details: { filePath, movedTo, template: settings.template },
+      details: {
+        filePath,
+        movedTo,
+        template: settings.template,
+        stdout: trimLogText(result.stdout),
+        stderr: trimLogText(result.stderr)
+      },
       sessionId
     });
     updateAmeiseState({

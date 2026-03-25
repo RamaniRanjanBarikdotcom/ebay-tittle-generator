@@ -1325,7 +1325,23 @@ ORDER BY
                           }
                         }
                       },
-                      { title: t('settings.ameiseLogMessage'), dataIndex: 'message' }
+                      {
+                        title: t('settings.ameiseLogMessage'),
+                        dataIndex: 'message',
+                        render: (value, record) => {
+                          if (value && value !== 'Ameise import completed' && value !== 'Ameise import failed' && value !== 'Ameise import started') {
+                            return value;
+                          }
+                          try {
+                            const parsed = record?.details ? JSON.parse(record.details) : null;
+                            const text = parsed?.stdout || parsed?.stderr || value || '-';
+                            if (!text) return value || '-';
+                            return text.length > 260 ? `${text.slice(0, 260)}…` : text;
+                          } catch {
+                            return value || '-';
+                          }
+                        }
+                      }
                     ]}
                   />
                 </Space>
