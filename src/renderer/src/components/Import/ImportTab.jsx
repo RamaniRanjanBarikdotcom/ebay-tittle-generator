@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Space, Table, Tabs, message, Progress } from 'antd';
+import { formatDecimalDE } from '../../utils/format.js';
 
 const HIDDEN_COLUMNS = new Set(['id', '__preview_id', 'session_id', 'created_at', 'updated_at', 'raw_query_data']);
 
@@ -11,6 +12,7 @@ export default function ImportTab({ t }) {
   const [progress, setProgress] = useState(null);
   const [dbConnected, setDbConnected] = useState(false);
   const [activeTab, setActiveTab] = useState('excel');
+  const [checkingDb, setCheckingDb] = useState(false);
 
   const previewColumns = useMemo(() => {
     const orderedKeys = [];
@@ -23,10 +25,23 @@ export default function ImportTab({ t }) {
         orderedKeys.push(key);
       });
     });
+    const isPriceColumn = (key) => {
+      const lower = String(key || '').toLowerCase();
+      if (!(lower.includes('price') || lower.includes('preis'))) return false;
+      if (lower.includes('adjustment') || lower.includes('status')) return false;
+      return true;
+    };
+
     return orderedKeys.map((key) => ({
       title: key,
       dataIndex: key,
-      width: key.toLowerCase().includes('title') ? 320 : 150
+      width: key.toLowerCase().includes('title') ? 320 : 150,
+      render: (value) => {
+        if (isPriceColumn(key)) {
+          return formatDecimalDE(value, { fallback: value ?? '' });
+        }
+        return value ?? '';
+      }
     }));
   }, [preview]);
 
@@ -90,6 +105,30 @@ export default function ImportTab({ t }) {
     }
   };
 
+  const refreshJtlConnection = async () => {
+    if (!window.api?.getDbProfiles || !window.api?.testDbProfile) return;
+    setCheckingDb(true);
+    try {
+      const profilesResult = await window.api.getDbProfiles();
+      if (!profilesResult?.success) {
+        setDbConnected(false);
+        return;
+      }
+      const { profiles = [], activeProfileId } = profilesResult.data || {};
+      const activeProfile = profiles.find((p) => p.id === activeProfileId);
+      if (!activeProfile) {
+        setDbConnected(false);
+        return;
+      }
+      const testResult = await window.api.testDbProfile(activeProfile);
+      setDbConnected(Boolean(testResult?.success));
+    } catch {
+      setDbConnected(false);
+    } finally {
+      setCheckingDb(false);
+    }
+  };
+
   useEffect(() => {
     loadProducts();
     let cleanupProgress;
@@ -97,13 +136,15 @@ export default function ImportTab({ t }) {
     if (window.api?.getDbAgentStatus) {
       window.api.getDbAgentStatus().then((result) => {
         if (result?.success) {
-          setDbConnected(Boolean(result.data?.connected));
+          if (result.data?.connected) setDbConnected(true);
+          else if (result.data?.enabled) setDbConnected(false);
         }
       });
     }
     if (window.api?.onDbAgentStatus) {
       cleanupDbStatus = window.api.onDbAgentStatus((status) => {
-        setDbConnected(Boolean(status?.connected));
+        if (status?.connected) setDbConnected(true);
+        else if (status?.enabled) setDbConnected(false);
       });
     }
     if (window.api?.onProgress) {
@@ -113,6 +154,7 @@ export default function ImportTab({ t }) {
         }
       });
     }
+    refreshJtlConnection().catch(() => {});
     return () => {
       if (cleanupProgress) cleanupProgress();
       if (cleanupDbStatus) cleanupDbStatus();
@@ -130,6 +172,12 @@ export default function ImportTab({ t }) {
       setActiveTab('excel');
     }
   }, [dbConnected, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'jtl') {
+      refreshJtlConnection().catch(() => {});
+    }
+  }, [activeTab]);
 
   return (
     <div className="panel">
@@ -193,6 +241,7 @@ export default function ImportTab({ t }) {
                     <Card title={t('import.jtlTitle')} variant="outlined">
                       <Space direction="vertical" size={12} style={{ width: '100%' }}>
                         <div className="empty-state">{t('import.jtlHint')}</div>
+                        {checkingDb ? <Progress percent={60} size="small" /> : null}
                       </Space>
                     </Card>
                   )

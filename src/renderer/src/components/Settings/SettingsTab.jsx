@@ -79,6 +79,7 @@ ORDER BY
   const [savingAmeise, setSavingAmeise] = useState(false);
   const [ameiseLogs, setAmeiseLogs] = useState([]);
   const [ameiseLogsLoading, setAmeiseLogsLoading] = useState(false);
+  const [ameiseRunLoading, setAmeiseRunLoading] = useState(false);
 
   const [automationMode, setAutomationMode] = useState('manual');
   const [automationScheduleMode, setAutomationScheduleMode] = useState('days');
@@ -553,6 +554,16 @@ ORDER BY
         value: ameiseArchiveFolder.trim()
       });
       message.success('Ameise trigger settings saved');
+      try {
+        const appDb = await window.api.getAppDbProfiles();
+        const { profiles = [], activeProfileId } = appDb?.data || {};
+        const activeProfile = profiles.find((p) => p.id === activeProfileId);
+        if (!activeProfile || !activeProfile.server || !activeProfile.database) {
+          message.warning(t('settings.ameiseLocalOnly'));
+        }
+      } catch {
+        // ignore app db warning checks
+      }
     } catch (error) {
       message.error(error.message || 'Failed to save Ameise settings');
     } finally {
@@ -572,6 +583,38 @@ ORDER BY
       message.error(error.message || 'Failed to load Ameise logs');
     } finally {
       setAmeiseLogsLoading(false);
+    }
+  };
+
+  const handleRunAmeiseLatest = async () => {
+    setAmeiseRunLoading(true);
+    try {
+      const result = await window.api.runAmeiseLatest();
+      if (!result?.success) {
+        message.error(result?.error || t('settings.ameiseRunFailed'));
+        return;
+      }
+      message.success(t('settings.ameiseRunSuccess'));
+      await loadAmeiseLogs();
+    } finally {
+      setAmeiseRunLoading(false);
+    }
+  };
+
+  const handleRunAmeisePick = async () => {
+    setAmeiseRunLoading(true);
+    try {
+      const filePath = await window.api.openCsvDialog();
+      if (!filePath) return;
+      const result = await window.api.runAmeiseFile(filePath);
+      if (!result?.success) {
+        message.error(result?.error || t('settings.ameiseRunFailed'));
+        return;
+      }
+      message.success(t('settings.ameiseRunSuccess'));
+      await loadAmeiseLogs();
+    } finally {
+      setAmeiseRunLoading(false);
     }
   };
 
@@ -1178,6 +1221,12 @@ ORDER BY
                     {t('settings.ameiseSave')}
                   </Button>
                   <Space>
+                    <Button onClick={handleRunAmeiseLatest} loading={ameiseRunLoading}>
+                      {t('settings.ameiseRunLatest')}
+                    </Button>
+                    <Button onClick={handleRunAmeisePick} loading={ameiseRunLoading}>
+                      {t('settings.ameiseRunPick')}
+                    </Button>
                     <Button onClick={loadAmeiseLogs} loading={ameiseLogsLoading}>
                       {t('settings.ameiseRefresh')}
                     </Button>

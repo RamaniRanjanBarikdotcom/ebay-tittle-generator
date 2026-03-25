@@ -1,13 +1,62 @@
 import DatabaseManager from '../database/sqlite.js';
 import { fixMojibakeText } from '../utils/textEncoding.js';
 
-function escapeCsv(value) {
+const CSV_DELIMITER = ';';
+const DE_PRICE_FORMATTER = new Intl.NumberFormat('de-DE', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
+function escapeCsv(value, delimiter = CSV_DELIMITER) {
   if (value === null || value === undefined) return '';
   const stringValue = fixMojibakeText(value);
-  if (/[",\n\r]/.test(stringValue)) {
+  if (stringValue.includes(delimiter) || /[",\n\r]/.test(stringValue)) {
     return `"${stringValue.replace(/"/g, '""')}"`;
   }
   return stringValue;
+}
+
+function parseLooseNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+
+  let text = String(value).trim();
+  if (!text) return null;
+  text = text.replace(/[^\d.,\-+]/g, '');
+  if (!text) return null;
+
+  const hasComma = text.includes(',');
+  const hasDot = text.includes('.');
+
+  if (hasComma && hasDot) {
+    if (text.lastIndexOf(',') > text.lastIndexOf('.')) {
+      text = text.replace(/\./g, '').replace(/,/g, '.');
+    } else {
+      text = text.replace(/,/g, '');
+    }
+  } else if (hasComma) {
+    const parts = text.split(',');
+    if (parts.length === 2 && parts[1].length <= 3) {
+      text = text.replace(/\./g, '').replace(',', '.');
+    } else {
+      text = text.replace(/,/g, '');
+    }
+  } else if (hasDot) {
+    const parts = text.split('.');
+    if (parts.length > 2) {
+      const last = parts.pop();
+      text = `${parts.join('')}.${last}`;
+    }
+  }
+
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatPriceForCsv(value) {
+  const num = parseLooseNumber(value);
+  if (num === null) return '';
+  return DE_PRICE_FORMATTER.format(num);
 }
 
 function isZeroSoldCount(value) {
@@ -69,11 +118,11 @@ export default class CsvExporter {
 
     const header = ['item_number', 'sku', 'updated_price', 'new_title'];
 
-    const lines = [header.map(escapeCsv).join(',')];
+    const lines = [header.map((v) => escapeCsv(v)).join(CSV_DELIMITER)];
 
     for (const item of grouped.values()) {
       const title = item.titles[0] || '';
-      const updatedPrice = item.suggested_price ?? item.price ?? '';
+      const updatedPrice = formatPriceForCsv(item.suggested_price ?? item.price ?? '');
 
       const row = [
         item.item_number || '',
@@ -81,7 +130,7 @@ export default class CsvExporter {
         updatedPrice,
         title
       ];
-      lines.push(row.map(escapeCsv).join(','));
+      lines.push(row.map((v) => escapeCsv(v)).join(CSV_DELIMITER));
     }
 
     return { csvContent: `${lines.join('\n')}\n`, count: grouped.size };
@@ -114,17 +163,17 @@ export default class CsvExporter {
       : [];
 
     const header = ['item_number', 'sku', 'updated_price', 'new_title'];
-    const lines = [header.map(escapeCsv).join(',')];
+    const lines = [header.map((v) => escapeCsv(v)).join(CSV_DELIMITER)];
 
     rows.forEach((row) => {
-      const updatedPrice = row.suggested_price ?? row.price ?? '';
+      const updatedPrice = formatPriceForCsv(row.suggested_price ?? row.price ?? '');
       const line = [
         row.item_number || '',
         row.sku || '',
         updatedPrice,
         row.title || ''
       ];
-      lines.push(line.map(escapeCsv).join(','));
+      lines.push(line.map((v) => escapeCsv(v)).join(CSV_DELIMITER));
     });
 
     return { csvContent: `${lines.join('\n')}\n`, count: rows.length };

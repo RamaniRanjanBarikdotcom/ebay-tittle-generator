@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Button, Card, Input, Table, message, Tag, Space, Progress, Select } from 'antd';
+import { formatDecimalDE, parseLooseNumber } from '../../utils/format.js';
 
 const MARKETPLACE_MAX = { ebay: 80, amazon: 200, kaufland: 100, otto: 120 };
 const MARKETPLACE_COLORS = { ebay: '#e53238', amazon: '#ff9900', kaufland: '#cc071e', otto: '#f00020' };
@@ -192,14 +193,18 @@ export default function ReviewTab({ t }) {
                 title: 'Price Plan',
                 width: 170,
                 render: (_, record) => {
-                  const oldPrice = Number(record.price);
-                  const sold = Number(record.sold_count);
-                  const nextPrice = Number(record.suggested_price);
-                  if (Number.isNaN(oldPrice)) return <Tag>n/a</Tag>;
-                  if (!Number.isNaN(sold) && sold === 0 && !Number.isNaN(nextPrice)) {
-                    return <Tag color="orange">{oldPrice.toFixed(2)} {'->'} {nextPrice.toFixed(2)}</Tag>;
+                  const oldPrice = parseLooseNumber(record.price);
+                  const sold = parseLooseNumber(record.sold_count);
+                  const nextPrice = parseLooseNumber(record.suggested_price);
+                  if (oldPrice === null) return <Tag>n/a</Tag>;
+                  if (sold !== null && sold === 0 && nextPrice !== null) {
+                    return (
+                      <Tag color="orange">
+                        {formatDecimalDE(oldPrice, { fallback: '-' })} {'->'} {formatDecimalDE(nextPrice, { fallback: '-' })}
+                      </Tag>
+                    );
                   }
-                  return <Tag color="green">{oldPrice.toFixed(2)}</Tag>;
+                  return <Tag color="green">{formatDecimalDE(oldPrice, { fallback: '-' })}</Tag>;
                 }
               },
               {

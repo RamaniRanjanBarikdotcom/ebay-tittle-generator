@@ -1,4 +1,5 @@
-import { dialog, ipcMain } from 'electron';
+import { app, dialog, ipcMain } from 'electron';
+import crypto from 'crypto';
 import { existsSync } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
@@ -17,7 +18,7 @@ import { getAutomationAgent } from './services/AutomationAgent.js';
 import RuleEngine from './title-engine/RuleEngine.js';
 import AppSqlStore from './services/AppSqlStore.js';
 import AuthService from './services/AuthService.js';
-import { encryptText, decryptText } from './utils/secureCrypto.js';
+import { encryptText, decryptText, encryptWithBaseKey, decryptWithBaseKey } from './utils/secureCrypto.js';
 import KnowledgeBaseImporter from './importers/KnowledgeBaseImporter.js';
 import KnowledgeBaseStore from './services/KnowledgeBaseStore.js';
 
@@ -252,6 +253,36 @@ export function registerIpcHandlers(mainWindow) {
     ).run(key, String(value), type);
   };
 
+  let queueSettingsSync = () => {};
+
+  const ensureMasterKey = () => {
+    try {
+      const db = DatabaseManager.getDatabase();
+      const stored = getSettingValue(db, 'app_master_key_plain', '');
+      if (stored) {
+        process.env.ETG_MASTER_KEY = stored;
+        return stored;
+      }
+      const legacy = getSettingValue(db, 'app_master_key', '');
+      if (legacy) {
+        const key = decryptWithBaseKey(legacy);
+        if (key) {
+          setSettingValue(db, 'app_master_key_plain', key, 'string');
+          process.env.ETG_MASTER_KEY = key;
+          return key;
+        }
+      }
+      const generated = crypto.randomBytes(32).toString('base64');
+      setSettingValue(db, 'app_master_key_plain', generated, 'string');
+      queueSettingsSync();
+      process.env.ETG_MASTER_KEY = generated;
+      return generated;
+    } catch (error) {
+      console.error('[Security] Failed to init master key:', error.message);
+      return null;
+    }
+  };
+
   const getAmeiseSettings = (db) => ({
     enabled: getSettingValue(db, 'ameise_enabled', 'false') === 'true',
     exePath: getSettingValue(db, 'ameise_exe_path', ''),
@@ -271,7 +302,7 @@ export function registerIpcHandlers(mainWindow) {
       return { skipped: true, reason: 'missing_csv' };
     }
 
-    const { profiles, activeProfileId } = getDbProfilesState(db);
+    const { profiles, activeProfileId } = getJtlDbProfilesState(db);
     const profile = profiles.find((p) => p.id === activeProfileId);
     if (!profile) return { skipped: true, reason: 'no_active_profile' };
     if (String(profile.authentication || 'sql') !== 'sql') {
@@ -332,6 +363,31 @@ export function registerIpcHandlers(mainWindow) {
     });
 
     return { success: true, movedTo, code: result.code || 0 };
+  };
+
+  const getLatestCsvInExportFolder = async () => {
+    const basePath = app.getPath('documents');
+    const folderPath = path.join(basePath, 'New generated tittles');
+    try {
+      const entries = await fs.readdir(folderPath, { withFileTypes: true });
+      const csvFiles = entries
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.csv'))
+        .map((entry) => entry.name);
+      if (!csvFiles.length) return null;
+      let latest = null;
+      let latestTime = 0;
+      for (const name of csvFiles) {
+        const filePath = path.join(folderPath, name);
+        const stat = await fs.stat(filePath);
+        if (stat.mtimeMs > latestTime) {
+          latestTime = stat.mtimeMs;
+          latest = filePath;
+        }
+      }
+      return latest;
+    } catch {
+      return null;
+    }
   };
 
   const ensurePrimaryAppDbSetting = (db) => {
@@ -432,10 +488,12 @@ export function registerIpcHandlers(mainWindow) {
   };
 
   let settingsSyncTimer = null;
-  const queueSettingsSync = () => {
+  queueSettingsSync = () => {
     if (settingsSyncTimer) clearTimeout(settingsSyncTimer);
     settingsSyncTimer = setTimeout(async () => {
       try {
+        const profile = AppSqlStore.getActiveProfile();
+        if (!profile || !String(profile.server || '').trim()) return;
         await AppSqlStore.syncSettings();
       } catch (error) {
         console.error('[AppSqlSync] settings sync failed:', error.message);
@@ -511,9 +569,13 @@ export function registerIpcHandlers(mainWindow) {
     }, 5 * 60 * 1000);
   };
 
-  setTimeout(() => {
-    queueRemoteRestore().catch(() => {});
-    scheduleRemoteRestore();
+  setTimeout(async () => {
+    try {
+      await queueRemoteRestore().catch(() => {});
+    } finally {
+      ensureMasterKey();
+      scheduleRemoteRestore();
+    }
   }, 50);
 
   ipcMain.handle('app:ping', async () => 'pong');
@@ -522,6 +584,15 @@ export function registerIpcHandlers(mainWindow) {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: 'Excel Files', extensions: ['xlsx', 'xls'] }]
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('dialog:openCsv', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'CSV Files', extensions: ['csv'] }]
     });
     if (result.canceled || !result.filePaths.length) return null;
     return result.filePaths[0];
@@ -943,9 +1014,8 @@ export function registerIpcHandlers(mainWindow) {
       setSettingValue(db, 'active_app_db_profile_id', nextActive, 'string');
       queueSettingsSync();
       if (nextActive) {
-        // If local already has data → push all sessions to MySQL; otherwise pull from MySQL
-        const pushed = queueAllLocalSessionsSync();
-        if (!pushed) queueRemoteRestore().catch(() => {});
+        // Prefer remote as source-of-truth when App DB is active
+        queueRemoteRestore({ force: true }).catch(() => {});
         scheduleRemoteRestore();
       }
       const responseProfiles = nextProfiles.map((p) => ({
@@ -977,8 +1047,7 @@ export function registerIpcHandlers(mainWindow) {
       setSettingValue(db, 'active_app_db_profile_id', nextActive, 'string');
       queueSettingsSync();
       if (nextActive) {
-        const pushed = queueAllLocalSessionsSync();
-        if (!pushed) queueRemoteRestore().catch(() => {});
+        queueRemoteRestore({ force: true }).catch(() => {});
         scheduleRemoteRestore();
       }
       const responseProfiles = nextProfiles.map((p) => ({
@@ -1001,8 +1070,7 @@ export function registerIpcHandlers(mainWindow) {
       setSettingValue(db, 'active_app_db_profile_id', payload?.id || '', 'string');
       queueSettingsSync();
       if (payload?.id) {
-        const pushed = queueAllLocalSessionsSync();
-        if (!pushed) queueRemoteRestore().catch(() => {});
+        queueRemoteRestore({ force: true }).catch(() => {});
         scheduleRemoteRestore();
       }
       return { success: true, data: { activeProfileId: payload?.id || '' }, error: null };
@@ -1580,6 +1648,49 @@ export function registerIpcHandlers(mainWindow) {
         .all();
       return { success: true, data: rows, error: null };
     } catch (error) {
+      return { success: false, data: null, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ameise:runLatest', async () => {
+    let filePath = null;
+    try {
+      const db = DatabaseManager.getDatabase();
+      const sessionId = resolveSessionId(db);
+      filePath = await getLatestCsvInExportFolder();
+      if (!filePath) return { success: false, data: null, error: 'No CSV found in export folder' };
+      const result = await runAmeiseImport({ filePath, sessionId });
+      return { success: true, data: { filePath, ...result }, error: null };
+    } catch (error) {
+      const db = DatabaseManager.getDatabase();
+      logEvent(db, {
+        level: 'error',
+        event: 'export.ameise',
+        message: 'Ameise import failed',
+        details: { error: error.message, filePath },
+        sessionId: resolveSessionId(db)
+      });
+      return { success: false, data: null, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ameise:runFile', async (_event, payload) => {
+    try {
+      const db = DatabaseManager.getDatabase();
+      const sessionId = resolveSessionId(db);
+      const filePath = payload?.filePath;
+      if (!filePath) return { success: false, data: null, error: 'Missing CSV file path' };
+      const result = await runAmeiseImport({ filePath, sessionId });
+      return { success: true, data: { filePath, ...result }, error: null };
+    } catch (error) {
+      const db = DatabaseManager.getDatabase();
+      logEvent(db, {
+        level: 'error',
+        event: 'export.ameise',
+        message: 'Ameise import failed',
+        details: { error: error.message, filePath: payload?.filePath || null },
+        sessionId: resolveSessionId(db)
+      });
       return { success: false, data: null, error: error.message };
     }
   });

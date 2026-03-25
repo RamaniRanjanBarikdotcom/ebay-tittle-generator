@@ -224,8 +224,16 @@ export default class PipelineRunner {
     // Delete stale titles for this product+marketplace before inserting fresh ones.
     // This ensures re-running the pipeline always replaces old titles rather than
     // accumulating duplicates via INSERT OR IGNORE.
+    const deleteHistoryForProduct = db.prepare(
+      `DELETE FROM title_history
+       WHERE generated_title_id IN (
+         SELECT id FROM generated_titles
+         WHERE product_id = ? AND marketplace = ? AND session_id IS ?
+       )`
+    );
+
     const deleteStaleForProduct = db.prepare(
-      'DELETE FROM generated_titles WHERE product_id = ? AND marketplace = ? AND session_id = ?'
+      'DELETE FROM generated_titles WHERE product_id = ? AND marketplace = ? AND session_id IS ?'
     );
 
     const updatePriceAnalysis = db.prepare(
@@ -387,6 +395,7 @@ export default class PipelineRunner {
 
           // Delete stale titles for this product+marketplace so re-runs always
           // replace old titles rather than leaving duplicates via INSERT OR IGNORE.
+          deleteHistoryForProduct.run(product.id, marketplace, sessionId || null);
           deleteStaleForProduct.run(product.id, marketplace, sessionId || null);
 
           titlesToInsert.forEach((title, idx) => {

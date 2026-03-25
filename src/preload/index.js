@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   ping: () => ipcRenderer.invoke('app:ping'),
   openExcelDialog: () => ipcRenderer.invoke('dialog:openExcel'),
+  openCsvDialog: () => ipcRenderer.invoke('dialog:openCsv'),
   saveExcelDialog: (defaultPath) => ipcRenderer.invoke('dialog:saveExcel', defaultPath),
   importExcel: (filePath) => ipcRenderer.invoke('data:importExcel', filePath),
   importDatabase: () => ipcRenderer.invoke('data:importDatabase'),
@@ -22,6 +23,8 @@ contextBridge.exposeInMainWorld('api', {
   getHistory: () => ipcRenderer.invoke('data:getHistory'),
   getLogs: () => ipcRenderer.invoke('data:getLogs'),
   getAmeiseLogs: () => ipcRenderer.invoke('ameise:getLogs'),
+  runAmeiseLatest: () => ipcRenderer.invoke('ameise:runLatest'),
+  runAmeiseFile: (filePath) => ipcRenderer.invoke('ameise:runFile', { filePath }),
   resetSession: () => ipcRenderer.invoke('data:resetSession'),
   getDbProfiles: () => ipcRenderer.invoke('db:getProfiles'),
   saveDbProfile: (profile, setActive = true) =>

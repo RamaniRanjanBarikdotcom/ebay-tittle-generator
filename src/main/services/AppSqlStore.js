@@ -736,6 +736,11 @@ export default class AppSqlStore {
     const force = Boolean(options?.force);
     const profile = this.getActiveProfile();
     if (!profile) return { synced: false, reason: 'No active app SQL profile' };
+    try {
+      this.validateProfile(profile);
+    } catch (error) {
+      return { synced: false, reason: error.message };
+    }
 
     const localDb = DatabaseManager.getDatabase();
     const localCount = localDb.prepare('SELECT COUNT(*) as c FROM products').get()?.c || 0;
@@ -747,23 +752,37 @@ export default class AppSqlStore {
 
     const remote = await this.withClient(profile, async ({ dialect, pool, conn }) => {
       if (dialect === 'mysql') {
-        const [products] = await conn.query('SELECT * FROM app_products ORDER BY id ASC');
-        const [titles] = await conn.query('SELECT * FROM app_generated_titles ORDER BY id ASC');
-        const [history] = await conn.query('SELECT * FROM app_title_history ORDER BY id ASC');
-        const [csv] = await conn.query('SELECT * FROM app_csv_exports ORDER BY id ASC');
-        const [logs] = await conn.query('SELECT * FROM app_logs ORDER BY id ASC');
+        const safeSelectAll = async (table, orderBy = 'id') => {
+          try {
+            const [rows] = await conn.query(`SELECT * FROM \`${table}\` ORDER BY ${orderBy} ASC`);
+            return Array.isArray(rows) ? rows : [];
+          } catch (error) {
+            if (/Unknown column 'id' in 'ORDER BY'/i.test(String(error?.message || ''))) {
+              const [rows] = await conn.query(`SELECT * FROM \`${table}\``);
+              return Array.isArray(rows) ? rows : [];
+            }
+            throw error;
+          }
+        };
+
+        const [products, titles, history, csv, logs, kb] = await Promise.all([
+          safeSelectAll('app_products'),
+          safeSelectAll('app_generated_titles'),
+          safeSelectAll('app_title_history'),
+          safeSelectAll('app_csv_exports'),
+          safeSelectAll('app_logs'),
+          safeSelectAll('app_title_knowledge_base')
+        ]);
         const [settings] = await conn.query(
-          'SELECT setting_key AS `key`, setting_value AS `value`, value_type FROM app_settings ORDER BY id ASC'
+          'SELECT setting_key AS `key`, setting_value AS `value`, value_type FROM app_settings ORDER BY updated_at DESC, setting_key ASC'
         );
-        const [kb] = await conn.query('SELECT * FROM app_title_knowledge_base ORDER BY id ASC');
         const [currentSessionRows] = await conn.query(
           "SELECT setting_value FROM app_settings WHERE setting_key = 'current_session_id' LIMIT 1"
         );
 
         const fetchOptional = async (tableName) => {
           try {
-            const [rows] = await conn.query(`SELECT * FROM ${tableName} ORDER BY id ASC`);
-            return Array.isArray(rows) ? rows : [];
+            return await safeSelectAll(tableName);
           } catch {
             return [];
           }
@@ -788,15 +807,30 @@ export default class AppSqlStore {
         };
       }
 
-      const productsRes = await pool.request().query('SELECT * FROM dbo.app_products ORDER BY id ASC');
-      const titlesRes = await pool.request().query('SELECT * FROM dbo.app_generated_titles ORDER BY id ASC');
-      const historyRes = await pool.request().query('SELECT * FROM dbo.app_title_history ORDER BY id ASC');
-      const csvRes = await pool.request().query('SELECT * FROM dbo.app_csv_exports ORDER BY id ASC');
-      const logsRes = await pool.request().query('SELECT * FROM dbo.app_logs ORDER BY id ASC');
+      const safeSelectAllMssql = async (tableName) => {
+        try {
+          const result = await pool.request().query(`SELECT * FROM ${tableName} ORDER BY id ASC`);
+          return result.recordset || [];
+        } catch (error) {
+          if (/Invalid column name 'id'/i.test(String(error?.message || ''))) {
+            const result = await pool.request().query(`SELECT * FROM ${tableName}`);
+            return result.recordset || [];
+          }
+          throw error;
+        }
+      };
+
+      const [productsRes, titlesRes, historyRes, csvRes, logsRes, kbRes] = await Promise.all([
+        safeSelectAllMssql('dbo.app_products'),
+        safeSelectAllMssql('dbo.app_generated_titles'),
+        safeSelectAllMssql('dbo.app_title_history'),
+        safeSelectAllMssql('dbo.app_csv_exports'),
+        safeSelectAllMssql('dbo.app_logs'),
+        safeSelectAllMssql('dbo.app_title_knowledge_base')
+      ]);
       const settingsRes = await pool
         .request()
-        .query('SELECT [key] AS [key], [value] AS [value], value_type FROM dbo.app_settings ORDER BY id ASC');
-      const kbRes = await pool.request().query('SELECT * FROM dbo.app_title_knowledge_base ORDER BY id ASC');
+        .query('SELECT [key] AS [key], [value] AS [value], value_type FROM dbo.app_settings ORDER BY updated_at DESC, [key] ASC');
       const currentSessionRes = await pool
         .request()
         .query("SELECT TOP 1 [value] AS setting_value FROM dbo.app_settings WHERE [key] = 'current_session_id'");
@@ -815,13 +849,13 @@ export default class AppSqlStore {
       const priceHistory = await fetchOptionalMssql('SELECT * FROM dbo.app_price_history ORDER BY id ASC');
 
       return {
-        products: productsRes.recordset || [],
-        titles: titlesRes.recordset || [],
-        history: historyRes.recordset || [],
-        csv: csvRes.recordset || [],
-        logs: logsRes.recordset || [],
+        products: productsRes || [],
+        titles: titlesRes || [],
+        history: historyRes || [],
+        csv: csvRes || [],
+        logs: logsRes || [],
         settings: settingsRes.recordset || [],
-        knowledgeBase: kbRes.recordset || [],
+        knowledgeBase: kbRes || [],
         extractedElements,
         skuImportCounts,
         priceHistory,
@@ -1739,6 +1773,11 @@ export default class AppSqlStore {
   static async syncSettings() {
     const profile = this.getActiveProfile();
     if (!profile) return { synced: false, reason: 'No active app SQL profile' };
+    try {
+      this.validateProfile(profile);
+    } catch (error) {
+      return { synced: false, reason: error.message };
+    }
 
     await this.ensureSchema(profile);
     const db = DatabaseManager.getDatabase();

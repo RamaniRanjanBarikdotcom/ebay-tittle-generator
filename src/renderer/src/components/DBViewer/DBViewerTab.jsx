@@ -16,6 +16,7 @@ import {
   TableOutlined,
   InboxOutlined
 } from '@ant-design/icons';
+import { formatDecimalDE } from '../../utils/format.js';
 
 const SENSITIVE_TABLES = new Set(['app_settings']);
 
@@ -56,6 +57,12 @@ function formatCellValue(value, colName) {
   if (colName === 'password_hash' || colName === 'password') {
     return <span style={{ color: 'var(--muted)', letterSpacing: 2 }}>••••••••</span>;
   }
+  const col = String(colName || '').toLowerCase();
+  if ((col.includes('price') || col.includes('preis')) && !col.includes('adjustment') && !col.includes('status')) {
+    const formatted = formatDecimalDE(value, { fallback: value });
+    return formatted;
+  }
+
   const str = String(value);
   if ((str.startsWith('{') || str.startsWith('[')) && str.length > 60) {
     return (

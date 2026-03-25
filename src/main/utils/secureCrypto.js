@@ -3,12 +3,9 @@ import os from 'os';
 import { app } from 'electron';
 
 const PREFIX = 'enc:v1:';
+const BASE_PREFIX = 'base:v1:';
 
-function getKey() {
-  const masterKey = process.env.ETG_MASTER_KEY || process.env.APP_SECRET_KEY;
-  if (masterKey && String(masterKey).trim()) {
-    return crypto.createHash('sha256').update(String(masterKey)).digest();
-  }
+function getBaseKey() {
   const seed = [
     app.getName(),
     app.getPath('userData'),
@@ -18,31 +15,37 @@ function getKey() {
   return crypto.createHash('sha256').update(seed).digest();
 }
 
-export function encryptText(value) {
+function getKey() {
+  const masterKey = process.env.ETG_MASTER_KEY || process.env.APP_SECRET_KEY;
+  if (masterKey && String(masterKey).trim()) {
+    return crypto.createHash('sha256').update(String(masterKey)).digest();
+  }
+  return getBaseKey();
+}
+
+function encryptWithKey(value, key, prefix = PREFIX) {
   const raw = String(value ?? '');
   if (!raw) return '';
-  if (raw.startsWith(PREFIX)) return raw;
+  if (raw.startsWith(prefix)) return raw;
 
-  const key = getKey();
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const encrypted = Buffer.concat([cipher.update(raw, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return `${PREFIX}${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
+  return `${prefix}${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
 }
 
-export function decryptText(value) {
+function decryptWithKey(value, key, prefix = PREFIX) {
   const raw = String(value ?? '');
   if (!raw) return '';
-  if (!raw.startsWith(PREFIX)) return raw;
+  if (!raw.startsWith(prefix)) return raw;
 
   try {
-    const payload = raw.slice(PREFIX.length);
+    const payload = raw.slice(prefix.length);
     const [ivB64, tagB64, dataB64] = payload.split(':');
     const iv = Buffer.from(ivB64, 'base64');
     const tag = Buffer.from(tagB64, 'base64');
     const data = Buffer.from(dataB64, 'base64');
-    const key = getKey();
     const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(tag);
     const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
@@ -50,6 +53,24 @@ export function decryptText(value) {
   } catch {
     return '';
   }
+}
+
+export function encryptText(value) {
+  const key = getKey();
+  return encryptWithKey(value, key, PREFIX);
+}
+
+export function decryptText(value) {
+  const key = getKey();
+  return decryptWithKey(value, key, PREFIX);
+}
+
+export function encryptWithBaseKey(value) {
+  return encryptWithKey(value, getBaseKey(), BASE_PREFIX);
+}
+
+export function decryptWithBaseKey(value) {
+  return decryptWithKey(value, getBaseKey(), BASE_PREFIX);
 }
 
 export function maskSecret(secret = '') {

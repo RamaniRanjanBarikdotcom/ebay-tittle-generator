@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Card, Input, Select, Space, Statistic, Table, Tag, Row, Col, message } from 'antd';
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { formatPriceDE } from '../../utils/format.js';
 
 function parseMetadata(metadata) {
   if (!metadata) return {};
@@ -21,10 +22,9 @@ function actionColor(action) {
 }
 
 function formatPrice(value) {
-  if (value === null || value === undefined || value === '') return '-';
-  const num = Number(value);
-  return Number.isNaN(num) ? String(value) : `€${num.toFixed(2)}`;
+  return formatPriceDE(value, { fallback: '-' });
 }
+
 
 export default function HistoryTab({ t }) {
   const [rows, setRows] = useState([]);
