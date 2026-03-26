@@ -271,7 +271,7 @@ export function registerIpcHandlers(mainWindow) {
       return { skipped: true, reason: 'missing_csv' };
     }
 
-    const { profiles, activeProfileId } = getDbProfilesState(db);
+    const { profiles, activeProfileId } = getJtlDbProfilesState(db);
     const profile = profiles.find((p) => p.id === activeProfileId);
     if (!profile) return { skipped: true, reason: 'no_active_profile' };
     if (String(profile.authentication || 'sql') !== 'sql') {
@@ -1150,12 +1150,23 @@ export function registerIpcHandlers(mainWindow) {
       const page = Math.max(1, Number(payload?.page) || 1);
       const pageSize = Math.min(500, Math.max(10, Number(payload?.pageSize) || 50));
       const offset = (page - 1) * pageSize;
+      const search = String(payload?.search || '').trim().toLowerCase();
       const db = DatabaseManager.getDatabase();
       const cols = db.prepare(`PRAGMA table_info("${safeTable}")`).all().map((c) => c.name);
-      const total = db.prepare(`SELECT COUNT(*) as count FROM "${safeTable}"`).get().count;
+      const safeCols = cols.map((col) => `"${String(col).replace(/"/g, '""')}"`);
+      let whereClause = '';
+      let whereParams = [];
+      if (search && safeCols.length) {
+        whereClause = ` WHERE ${safeCols.map((col) => `LOWER(CAST(${col} AS TEXT)) LIKE ?`).join(' OR ')}`;
+        const like = `%${search}%`;
+        whereParams = safeCols.map(() => like);
+      }
+      const total = db
+        .prepare(`SELECT COUNT(*) as count FROM "${safeTable}"${whereClause}`)
+        .get(...whereParams).count;
       const rows = db
-        .prepare(`SELECT * FROM "${safeTable}" ORDER BY rowid DESC LIMIT ? OFFSET ?`)
-        .all(pageSize, offset);
+        .prepare(`SELECT * FROM "${safeTable}"${whereClause} ORDER BY rowid DESC LIMIT ? OFFSET ?`)
+        .all(...whereParams, pageSize, offset);
       return { success: true, data: { rows, total, columns: cols }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1230,21 +1241,70 @@ export function registerIpcHandlers(mainWindow) {
       const page = Math.max(1, Number(payload?.page) || 1);
       const pageSize = Math.min(500, Math.max(10, Number(payload?.pageSize) || 50));
       const offset = (page - 1) * pageSize;
+      const search = String(payload?.search || '').trim().toLowerCase();
 
       const result = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
         if (dialect === 'mysql') {
-          const [[{ total }]] = await conn.query(`SELECT COUNT(*) as total FROM \`${safeTable}\``);
-          const [rows] = await conn.query(`SELECT * FROM \`${safeTable}\` ORDER BY id DESC LIMIT ? OFFSET ?`, [pageSize, offset]);
-          const cols = rows.length ? Object.keys(rows[0]) : [];
+          const dbName = profile.database || '';
+          const [colRows] = await conn.query(
+            `SELECT COLUMN_NAME as name
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+             ORDER BY ORDINAL_POSITION`,
+            [dbName, safeTable]
+          );
+          const cols = (colRows || []).map((r) => r.name).filter(Boolean);
+          let whereClause = '';
+          let whereParams = [];
+          if (search && cols.length) {
+            whereClause = ` WHERE ${cols
+              .map((col) => `LOWER(CAST(\`${String(col).replace(/`/g, '``')}\` AS CHAR)) LIKE ?`)
+              .join(' OR ')}`;
+            const like = `%${search}%`;
+            whereParams = cols.map(() => like);
+          }
+          const [[{ total }]] = await conn.query(
+            `SELECT COUNT(*) as total FROM \`${safeTable}\`${whereClause}`,
+            whereParams
+          );
+          const orderCol = cols.includes('id') ? 'id' : (cols[0] || 'id');
+          const [rows] = await conn.query(
+            `SELECT * FROM \`${safeTable}\`${whereClause} ORDER BY \`${String(orderCol).replace(/`/g, '``')}\` DESC LIMIT ? OFFSET ?`,
+            [...whereParams, pageSize, offset]
+          );
           return { rows, total: Number(total), columns: cols };
         } else {
-          const countRes = await pool.request().query(`SELECT COUNT(*) as total FROM [${safeTable}]`);
+          const colsReq = pool.request();
+          colsReq.input('table_name', safeTable);
+          const colsRes = await colsReq.query(
+            `SELECT COLUMN_NAME as name
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_NAME = @table_name
+             ORDER BY ORDINAL_POSITION`
+          );
+          const cols = (colsRes.recordset || []).map((r) => r.name).filter(Boolean);
+          const whereParts = [];
+          const like = `%${search}%`;
+          const countReq = pool.request();
+          const dataReq = pool.request();
+          if (search && cols.length) {
+            cols.forEach((col, idx) => {
+              const param = `q${idx}`;
+              const safeCol = `[${String(col).replace(/]/g, ']]')}]`;
+              whereParts.push(`LOWER(CAST(${safeCol} AS NVARCHAR(MAX))) LIKE @${param}`);
+              countReq.input(param, like);
+              dataReq.input(param, like);
+            });
+          }
+          const whereClause = whereParts.length ? ` WHERE ${whereParts.join(' OR ')}` : '';
+          const countRes = await countReq.query(`SELECT COUNT(*) as total FROM [${safeTable}]${whereClause}`);
           const total = Number(countRes.recordset[0]?.total) || 0;
-          const dataRes = await pool.request().query(
-            `SELECT * FROM [${safeTable}] ORDER BY id DESC OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`
+          const orderCol = cols.includes('id') ? 'id' : (cols[0] || 'id');
+          const safeOrder = `[${String(orderCol).replace(/]/g, ']]')}]`;
+          const dataRes = await dataReq.query(
+            `SELECT * FROM [${safeTable}]${whereClause} ORDER BY ${safeOrder} DESC OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`
           );
           const rows = dataRes.recordset || [];
-          const cols = rows.length ? Object.keys(rows[0]) : [];
           return { rows, total, columns: cols };
         }
       });

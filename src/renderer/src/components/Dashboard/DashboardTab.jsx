@@ -18,7 +18,7 @@ const MARKETPLACE_COLORS = {
   otto: '#f00020'
 };
 
-export default function DashboardTab({ t }) {
+export default function DashboardTab() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(false);
 

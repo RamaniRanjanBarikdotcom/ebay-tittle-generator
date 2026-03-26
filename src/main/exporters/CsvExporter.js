@@ -19,7 +19,7 @@ function isZeroSoldCount(value) {
 }
 
 export default class CsvExporter {
-  static getGroupedRows(language = 'de', sessionId = null) {
+  static getGroupedRows(language = 'de', sessionId = null, marketplace = 'ebay') {
     const db = DatabaseManager.getDatabase();
     const rows = sessionId
       ? db
@@ -31,12 +31,14 @@ export default class CsvExporter {
              LEFT JOIN generated_titles gt
                ON gt.product_id = p.id
               AND gt.session_id = ?
+              AND COALESCE(gt.marketplace, 'ebay') = ?
              WHERE p.session_id = ?
              ORDER BY p.id,
                       CASE WHEN gt.language = ? THEN 0 ELSE 1 END,
-                      gt.variation_number`
+                      gt.variation_number,
+                      gt.created_at DESC`
           )
-          .all(sessionId, sessionId, language)
+          .all(sessionId, marketplace, sessionId, language)
       : [];
 
     const grouped = new Map();
@@ -64,8 +66,8 @@ export default class CsvExporter {
     return grouped;
   }
 
-  static buildCsvContent(language = 'de', sessionId = null) {
-    const grouped = this.getGroupedRows(language, sessionId);
+  static buildCsvContent(language = 'de', sessionId = null, marketplace = 'ebay') {
+    const grouped = this.getGroupedRows(language, sessionId, marketplace);
 
     const header = ['item_number', 'sku', 'updated_price', 'new_title'];
 
@@ -87,7 +89,7 @@ export default class CsvExporter {
     return { csvContent: `${lines.join('\n')}\n`, count: grouped.size };
   }
 
-  static buildDirectSessionCsvContent(language = 'de', sessionId = null) {
+  static buildDirectSessionCsvContent(language = 'de', sessionId = null, marketplace = 'ebay') {
     const db = DatabaseManager.getDatabase();
     const rows = sessionId
       ? db
@@ -99,7 +101,8 @@ export default class CsvExporter {
                         FROM generated_titles gt
                         WHERE gt.product_id = p.id
                           AND gt.session_id = p.session_id
-                        ORDER BY CASE WHEN gt.language = ? THEN 0 ELSE 1 END, gt.variation_number ASC
+                          AND COALESCE(gt.marketplace, 'ebay') = ?
+                        ORDER BY CASE WHEN gt.language = ? THEN 0 ELSE 1 END, gt.variation_number ASC, gt.created_at DESC
                         LIMIT 1
                       ),
                       p.original_title,
@@ -109,7 +112,7 @@ export default class CsvExporter {
              WHERE p.session_id = ?
              ORDER BY p.id ASC`
           )
-          .all(language, sessionId)
+          .all(marketplace, language, sessionId)
           .filter((row) => isZeroSoldCount(row.sold_count))
       : [];
 
@@ -130,8 +133,8 @@ export default class CsvExporter {
     return { csvContent: `${lines.join('\n')}\n`, count: rows.length };
   }
 
-  static async exportGeneratedTitles(filePath, language = 'de', sessionId = null) {
-    const { csvContent, count } = this.buildCsvContent(language, sessionId);
+  static async exportGeneratedTitles(filePath, language = 'de', sessionId = null, marketplace = 'ebay') {
+    const { csvContent, count } = this.buildCsvContent(language, sessionId, marketplace);
     const fs = await import('fs/promises');
     await fs.writeFile(filePath, `\uFEFF${csvContent}`, 'utf8');
     return { success: true, filePath, count };

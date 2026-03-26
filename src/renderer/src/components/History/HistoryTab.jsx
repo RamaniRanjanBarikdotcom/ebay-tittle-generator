@@ -23,7 +23,9 @@ function actionColor(action) {
 function formatPrice(value) {
   if (value === null || value === undefined || value === '') return '-';
   const num = Number(value);
-  return Number.isNaN(num) ? String(value) : `€${num.toFixed(2)}`;
+  return Number.isNaN(num)
+    ? String(value)
+    : `€${new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num)}`;
 }
 
 export default function HistoryTab({ t }) {

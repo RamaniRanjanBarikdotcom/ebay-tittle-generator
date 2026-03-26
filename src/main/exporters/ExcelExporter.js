@@ -10,7 +10,7 @@ function isZeroSoldCount(value) {
 }
 
 export default class ExcelExporter {
-  static async exportGeneratedTitles(filePath, language = 'de', sessionId = null) {
+  static async exportGeneratedTitles(filePath, language = 'de', sessionId = null, marketplace = 'ebay') {
     const db = DatabaseManager.getDatabase();
     const rows = sessionId
       ? db
@@ -22,12 +22,14 @@ export default class ExcelExporter {
              LEFT JOIN generated_titles gt
                ON gt.product_id = p.id
               AND gt.session_id = ?
+              AND COALESCE(gt.marketplace, 'ebay') = ?
              WHERE p.session_id = ?
              ORDER BY p.id,
                       CASE WHEN gt.language = ? THEN 0 ELSE 1 END,
-                      gt.variation_number`
+                      gt.variation_number,
+                      gt.created_at DESC`
           )
-          .all(sessionId, sessionId, language)
+          .all(sessionId, marketplace, sessionId, language)
       : [];
 
     const grouped = new Map();

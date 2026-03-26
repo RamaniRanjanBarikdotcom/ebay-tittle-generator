@@ -41,11 +41,6 @@ export default function LogsTab({ t, isAdmin }) {
     loadLogs();
   }, [loadLogs]);
 
-  const eventOptions = useMemo(() => {
-    const events = [...new Set(rows.map((r) => r.event).filter(Boolean))].sort();
-    return events.map((e) => ({ value: e, label: e }));
-  }, [rows]);
-
   const filtered = useMemo(() => {
     return rows.filter((row) => {
       if (levelFilter.length && !levelFilter.includes(row.level)) return false;
