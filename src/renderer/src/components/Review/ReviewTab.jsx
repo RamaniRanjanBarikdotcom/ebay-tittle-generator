@@ -227,7 +227,6 @@ export default function ReviewTab({ t }) {
                 title: 'Price Plan',
                 width: 170,
                 render: (_, record) => {
-<<<<<<< HEAD
                   const oldPrice = parseLooseNumber(record.price);
                   const sold = parseLooseNumber(record.sold_count);
                   const nextPrice = parseLooseNumber(record.suggested_price);
@@ -240,16 +239,6 @@ export default function ReviewTab({ t }) {
                     );
                   }
                   return <Tag color="green">{formatDecimalDE(oldPrice, { fallback: '-' })}</Tag>;
-=======
-                  const oldPrice = Number(record.price);
-                  const sold = Number(record.sold_count);
-                  const nextPrice = Number(record.suggested_price);
-                  if (Number.isNaN(oldPrice)) return <Tag>n/a</Tag>;
-                  if (!Number.isNaN(sold) && sold === 0 && !Number.isNaN(nextPrice)) {
-                    return <Tag color="orange">{formatEuro(oldPrice)} {'->'} {formatEuro(nextPrice)}</Tag>;
-                  }
-                  return <Tag color="green">{formatEuro(oldPrice)}</Tag>;
->>>>>>> new-fix
                 }
               },
               {

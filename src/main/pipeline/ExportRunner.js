@@ -167,11 +167,7 @@ export default class ExportRunner {
       onProgress({ scope: 'export', percent: 10, message: 'Writing Excel file' });
     }
 
-<<<<<<< HEAD
     const result = await ExcelExporter.exportGeneratedTitles(filePath, language, resolved.sessionId);
-=======
-    const result = await ExcelExporter.exportGeneratedTitles(filePath, language, sessionId, 'ebay');
->>>>>>> new-fix
     this.recordHistory({
       destination: 'excel',
       exportFilename: filePath,
@@ -202,13 +198,8 @@ export default class ExportRunner {
     }
 
     const { csvContent, count } = directProductCsv
-<<<<<<< HEAD
       ? CsvExporter.buildDirectSessionCsvContent(language, resolved.sessionId)
       : CsvExporter.buildCsvContent(language, resolved.sessionId);
-=======
-      ? CsvExporter.buildDirectSessionCsvContent(language, sessionId, 'ebay')
-      : CsvExporter.buildCsvContent(language, sessionId, 'ebay');
->>>>>>> new-fix
 
     if (onProgress) {
       onProgress({ scope: 'export', percent: 70, message: 'Saving CSV file and archiving in database' });
