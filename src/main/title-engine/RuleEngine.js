@@ -86,29 +86,35 @@ function truncateToMax(title, maxLength) {
   return removeDanglingKompatibel(out);
 }
 
-function padIfShort(title, minLength, maxLength, hasPrinterModels = true) {
-  let out = norm(title);
-  const pads = hasPrinterModels ? [' Druckerpatrone'] : [' Druckermodell'];
+function padIfShort(title) {
+  return norm(title);
+}
 
-  // Pipe-aware: pad before the pipe so tail stays at the end
-  const pipeIdx = out.lastIndexOf(' | ');
-  if (pipeIdx >= 0) {
-    let main = out.slice(0, pipeIdx);
-    const tail = out.slice(pipeIdx);
-    for (const pad of pads) {
-      if ((main + tail).length >= minLength) break;
-      const candidate = main + pad;
-      if ((candidate + tail).length <= maxLength) main = candidate;
+function compactAlphaNum(value) {
+  return String(value || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+}
+
+function collapseAdjacentRepeatedPhrases(text) {
+  let words = norm(text).split(/\s+/).filter(Boolean);
+  if (words.length < 4) return words.join(' ');
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const maxPhrase = Math.min(5, Math.floor(words.length / 2));
+    for (let size = maxPhrase; size >= 2; size -= 1) {
+      for (let i = 0; i + size * 2 <= words.length; i += 1) {
+        const left = words.slice(i, i + size).join(' ').toUpperCase();
+        const right = words.slice(i + size, i + size * 2).join(' ').toUpperCase();
+        if (left !== right) continue;
+        words.splice(i + size, size);
+        changed = true;
+        break;
+      }
+      if (changed) break;
     }
-    return norm(main) + tail;
   }
-
-  // No pipe
-  for (const pad of pads) {
-    if (out.length >= minLength) break;
-    if ((out + pad).length <= maxLength) out = norm(out + pad);
-  }
-  return out;
+  return words.join(' ');
 }
 
 // Build plan Fix 1: Order longer/compound names first to avoid partial matches.
@@ -302,6 +308,7 @@ function extendPrinterSeries(title, baseSeries) {
   if (/\bstylus\s+d\b/i.test(title)) return 'Stylus D';
   if (/\bphotosmart\s+premium\s+e-aio\b/i.test(title)) return 'Photosmart Premium E-AIO';
   if (/\bofficejet\s+pro\b/i.test(title)) return 'OfficeJet Pro';
+  if (/\bofficejet\b/i.test(title) && !/\bofficejet\s+pro\b/i.test(title)) return 'OfficeJet';
   if (/\blaserjet\s+enterprise\s+mfp\s+m\b/i.test(title)) return 'LaserJet Enterprise MFP M';
   if (/\bmaxify\s+mb\b/i.test(title)) return 'Maxify MB';
   if (/\blasershot\b/i.test(title)) return 'Lasershot';
@@ -321,7 +328,7 @@ function extendPrinterSeries(title, baseSeries) {
   if (/\bDCP[-\s]/i.test(title)) return 'DCP';
   if (/\bMFC(?:[-\s]|\d)/i.test(title)) return 'MFC';
   if (/\bHL[-\s]/i.test(title)) return 'HL';
-  if (/\bFAX[-\s]?/i.test(title)) return 'FAX';
+  if (/\bFAX[-\s]\d/i.test(title)) return 'FAX';
   if (/\bIntellifax\b/i.test(title)) return 'Intellifax';
   if (/\bESPC?\b/i.test(title)) return 'ESP';
   if (/\bcolor\s+laserjet\s+cp\b/i.test(title)) return 'Color LaserJet CP';
@@ -439,7 +446,7 @@ function splitCategory(title) {
   const hasDrum = /\btrommel|bildtrommel|drum\b/i.test(title);
   if (hasDrum) return 'Trommel';
   if (hasToner) return 'Toner';
-  if (/\btintenpatronen?\b|\bdruckerpatrone\b|\bpatronen?\b|\bink\b/i.test(title)) return 'Tintenpatrone';
+  if (/\btintenpatronen?\b|\bdruckerpatrone\b|\bpatronen?\b|\bink\b|\btinte\b/i.test(title)) return 'Tintenpatrone';
   if (/\bLC[-\s]?\d{3,4}|PGI-?\d|CLI-?\d\b/i.test(title)) return 'Tintenpatrone';
   return 'Toner';
 }
@@ -575,15 +582,51 @@ function extractHpEnvyModels(title) {
   return uniq(models);
 }
 
+function extractHpOfficeJetModels(title) {
+  const models = [];
+  // Match "OfficeJet Pro XXXX [suffix]" or "OfficeJet XXXX [suffix]"
+  // e.g. "OfficeJet Pro 8500 Premier", "OfficeJet Pro 8000 Wireless", "OfficeJet 4500"
+  const matches = [
+    ...title.matchAll(/\bOfficeJet(?:\s+Pro)?\s+(\d{3,5})(?:\s+(Premier|Wireless|Plus|All-in-One|AIO))?\b/gi)
+  ];
+  for (const match of matches) {
+    const num = match[1];
+    const suffix = match[2] ? ` ${match[2]}` : '';
+    models.push(`${num}${suffix}`);
+  }
+  // Also capture sequences: "OfficeJet Pro 8500 8000 8500A"
+  const seqMatches = [
+    ...title.matchAll(/\bOfficeJet(?:\s+Pro)?\s+(\d{3,5}[A-Z]?(?:\s+\d{3,5}[A-Z]?)+)\b/gi)
+  ];
+  for (const match of seqMatches) {
+    const numbers = (match[1] || '').trim().split(/\s+/);
+    for (const n of numbers) {
+      if (/^\d{3,5}[A-Z]?$/.test(n)) {
+        models.push(n.toUpperCase());
+      }
+    }
+  }
+  return uniq(models);
+}
+
+function extractHpPhotosmartPremiumFaxModels(title) {
+  const models = [];
+  const hits = [...title.matchAll(/\bPhotosmart\s+Premium\s+Fax\b/gi)];
+  for (const match of hits) {
+    models.push(norm(match[0]));
+  }
+  return uniq(models);
+}
+
 function extractCanonPixmaModels(title) {
   const models = [];
   // Pass 1: compact/single forms like "Pixma TS3150", "Pixma TS 3150", or "Pixma TR 8550"
-  const direct = [...title.matchAll(/\bPixma\s+((?:MG|TS|MX|IP|iP|TR)\s*\d{3,4}[A-Z]{0,3})\b/gi)];
+  const direct = [...title.matchAll(/\bPixma\s+((?:MG|TS|MX|IP|iP|IX|iX|TR)\s*\d{3,4}[A-Z]{0,3})\b/gi)];
   for (const match of direct) {
     const raw = norm(match[1] || '');
     if (!raw) continue;
     const compact = raw.replace(/\s+/g, '');
-    const split = compact.match(/^(MG|TS|MX|IP|iP|TR)(\d{3,4}[A-Z]{0,3})$/i);
+    const split = compact.match(/^(MG|TS|MX|IP|iP|IX|iX|TR)(\d{3,4}[A-Z]{0,3})$/i);
     if (split) {
       models.push(`Pixma ${split[1].toUpperCase()} ${split[2].toUpperCase()}`);
     } else {
@@ -593,7 +636,7 @@ function extractCanonPixmaModels(title) {
   // Pass 2: "Pixma TS 3150 3350 3450 ..." — series prefix + sequence of bare numbers
   // First number is already captured by Pass 1; emit remaining as bare numbers (no prefix)
   const seriesPass = [
-    ...title.matchAll(/\bPixma\s+(TS|MG|MX|IP|iP|TR)\s+(\d{3,4}[A-Z]{0,3}(?:\s+\d{3,4}[A-Z]{0,3})+)\b/gi)
+    ...title.matchAll(/\bPixma\s+(TS|MG|MX|IP|iP|IX|iX|TR)\s+(\d{3,4}[A-Z]{0,3}(?:\s+\d{3,4}[A-Z]{0,3})+)\b/gi)
   ];
   for (const match of seriesPass) {
     const numbers = (match[2] || '').trim().split(/\s+/);
@@ -610,16 +653,34 @@ function removeCartridgeDerivedPrinterNoise(printerModels, cartridgeModels, titl
   const cartKeys = (cartridgeModels || [])
     .map((c) => String(c || '').replace(/[^A-Z0-9]/gi, '').toUpperCase())
     .filter(Boolean);
+  // Also extract the numeric+suffix core from cartridge models (e.g. LC-223Y → 223Y)
+  const cartSuffixes = (cartridgeModels || [])
+    .map((c) => {
+      const m = String(c || '').match(/(\d{2,4}[A-Z]{0,3})$/i);
+      return m ? m[1].toUpperCase() : '';
+    })
+    .filter(Boolean);
   return (printerModels || []).filter((model) => {
     const raw = String(model || '').trim();
     if (!raw) return false;
     const key = raw.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+    const familySuffixMatch = raw.match(/^(MFC|DCP|HL|FAX)\s+(\d{2,4}[A-Z]{1,3})(?:\s+[A-Z]{1,3})?$/i);
+    if (familySuffixMatch) {
+      const core = String(familySuffixMatch[2] || '').toUpperCase();
+      if (cartSuffixes.some((cs) => cs === core || cs.endsWith(core) || core.endsWith(cs))) {
+        return false;
+      }
+    }
     // Keep realistic printer-family tokens.
-    if (/\b(SL-|CLX|CLP|MFC|DCP|HL|PIXMA|LASER|XP-|ECOSYS|ISENSYS|DESKJET|ENVY)\b/i.test(raw)) return true;
-    // Remove short tokens that are mostly cartridge suffixes (e.g. 504S, 504S N).
+    if (/\b(SL-|CLX|CLP|MFC|DCP|HL|PIXMA|LASER|XP-|ECOSYS|ISENSYS|DESKJET|ENVY|FAX)\b/i.test(raw)) return true;
+    // Remove short tokens that are mostly cartridge suffixes (e.g. 504S, 223Y DW).
     if (/^\d{3,4}[A-Z]{1,2}(?:\s+[A-Z]{1,3})?$/i.test(raw)) {
       const slashAliasPattern = new RegExp(`\\/\\s*${key}\\b`, 'i');
       if (slashAliasPattern.test(String(title || ''))) return true;
+      // Strip trailing suffix (e.g. "223Y DW" → "223Y") and check against cartridge suffixes
+      const coreMatch = raw.match(/^(\d{2,4}[A-Z]{1,2})/i);
+      const core = coreMatch ? coreMatch[1].toUpperCase() : key;
+      if (cartSuffixes.some((cs) => cs === core || cs.endsWith(core) || core.endsWith(cs))) return false;
       return !cartKeys.some((ck) => ck.endsWith(key) || ck.includes(key));
     }
     return true;
@@ -739,9 +800,21 @@ function extractBrotherJModels(title) {
       models.push(token);
       continue;
     }
+    // "MFC-J" or "DCP-J" without digits → pending prefix for next number token
+    // Handles spaced patterns like "MFC-J 885" → will become "MFC-J885"
+    if (/^(MFC|DCP)-J$/i.test(token)) {
+      pendingPrefix = token; // "MFC-J"
+      continue;
+    }
     // Standalone MFC/DCP → set pending prefix for the NEXT J-token only
     if (token === 'DCP') { pendingPrefix = 'DCP-'; continue; }
     if (token === 'MFC') { pendingPrefix = 'MFC-'; continue; }
+    // Number token after "MFC-J" prefix: "885" or "480DW" → "MFC-J885" or "MFC-J480DW"
+    if (pendingPrefix && /^(MFC|DCP)-J$/i.test(pendingPrefix) && /^\d{3,4}[A-Z]{0,3}$/.test(token)) {
+      models.push(`${pendingPrefix}${token}`);
+      pendingPrefix = '';
+      continue;
+    }
     if (/^J\d{3,4}[A-Z]{0,3}$/.test(token)) {
       if (pendingPrefix) {
         // e.g. "MFC J480DW" → "MFC-J480DW"; prefix consumed, next J-tokens will be bare
@@ -751,8 +824,18 @@ function extractBrotherJModels(title) {
         models.push(token); // bare J-token: keep as-is
       }
     } else {
-      pendingPrefix = ''; // non-J token clears pending prefix
+      pendingPrefix = ''; // non-matching token clears pending prefix
     }
+  }
+  return uniq(models);
+}
+
+function extractBrotherFaxModels(title) {
+  const models = [];
+  const matches = [...title.matchAll(/\bFAX[-\s]?(\d{3,5})\s*([A-Z]{0,3})\b/gi)];
+  for (const m of matches) {
+    const suffix = m[2] ? ` ${m[2].toUpperCase()}` : '';
+    models.push(`FAX ${m[1]}${suffix}`);
   }
   return uniq(models);
 }
@@ -896,10 +979,10 @@ export default class RuleEngine {
     const kompatibel = detectKompatibelConnector(cleanTitle);
 
     let color = '';
-    if (/\bschwarz\b|black\b/i.test(cleanTitle)) color = 'Schwarz';
+    if (/\bschwarz\b|\bblack\b/i.test(cleanTitle)) color = 'Schwarz';
     else if (/\bcyan\b/i.test(cleanTitle)) color = 'Cyan';
     else if (/\bmagenta\b/i.test(cleanTitle)) color = 'Magenta';
-    else if (/\bgelb\b|yellow\b/i.test(cleanTitle)) color = 'Gelb';
+    else if (/\bgelb\b|\byellow\b/i.test(cleanTitle)) color = 'Gelb';
     else if (/\bmehrfarbig\b/i.test(cleanTitle)) color = 'Mehrfarbig';
     else if (/\bB\s+C\s+Y\s+M\b/i.test(cleanTitle)) color = 'B C Y M';
 
@@ -955,9 +1038,14 @@ export default class RuleEngine {
     const hpLaserPlainModels = /\bHP\b/i.test(cleanTitle) ? extractHpLaserPlainModels(cleanTitle) : [];
     const hpDeskJetModels = /\bDeskJet\b/i.test(cleanTitle) ? extractHpDeskJetModels(cleanTitle) : [];
     const hpEnvyModels = /\bEnvy\b/i.test(cleanTitle) ? extractHpEnvyModels(cleanTitle) : [];
+    const hpOfficeJetModels = /\bOfficeJet\b/i.test(cleanTitle) ? extractHpOfficeJetModels(cleanTitle) : [];
+    const hpPhotosmartPremiumFaxModels = /\bPhotosmart\s+Premium\s+Fax\b/i.test(cleanTitle)
+      ? extractHpPhotosmartPremiumFaxModels(cleanTitle)
+      : [];
     const canonPixmaModels = extractCanonPixmaModels(cleanTitle);
     const lexmarkEModels = extractLexmarkEModels(cleanTitle);
     const brotherJModels = extractBrotherJModels(cleanTitle);
+    const brotherFaxModels = /\bFAX[-\s]\d/i.test(cleanTitle) ? extractBrotherFaxModels(cleanTitle) : [];
     const okiDnModels = printerBrand.toUpperCase() === 'OKI' ? extractOkiDnModels(cleanTitle) : [];
     const diconixModels = (/\bdiconix\b/i.test(cleanTitle) || /\bkodak\b/i.test(cleanTitle))
       ? extractDiconixModels(cleanTitle) : [];
@@ -975,12 +1063,15 @@ export default class RuleEngine {
       ...hpLaserPlainModels,
       ...hpDeskJetModels,
       ...hpEnvyModels,
+      ...hpOfficeJetModels,
+      ...hpPhotosmartPremiumFaxModels,
       ...canonPixmaModels,
       ...samsungSlSpacedModels,
       ...samsungXpressMModels,
       ...samsungClxClpModels,
       ...lexmarkEModels,
       ...brotherJModels,
+      ...brotherFaxModels,
       ...extraPrinterCodes,
       ...okiDnModels,
       ...diconixModels,
@@ -1092,6 +1183,12 @@ export default class RuleEngine {
       ? [elements.variationPrinterModel]
       : mergeSeriesWithPrinterModels(elements.series || '', elements.printerModels || []);
 
+    // Final safety net: filter out cartridge-derived noise from printer models
+    // This catches leaks from KB override, cached data, or any other source
+    const printerModelsClean = removeCartridgeDerivedPrinterNoise(
+      printerModelsRaw, cartridgeModels, originalTitle
+    );
+
     const printerBrandBlock = norm(printerBrand);
     const bracketBlock = norm(bracketCodes.join(' '));
 
@@ -1099,7 +1196,7 @@ export default class RuleEngine {
     const tail = [qty, color].filter(Boolean).join(' ');
     const tailStr = tail ? ` | ${tail}` : '';
 
-    let pm = [...printerModelsRaw];
+    let pm = [...printerModelsClean];
     if (pm.length >= 2) pm = swapLastTwo(pm);
     if (pm.length > 2) {
       const shift = stableHashInt(sku) % pm.length;
@@ -1145,9 +1242,26 @@ export default class RuleEngine {
       return result;
     };
 
+    const keepMostSpecificModels = (modelList) => {
+      const scored = (modelList || [])
+        .map((m) => ({ raw: norm(m), key: compactAlphaNum(m) }))
+        .filter((m) => m.raw && m.key);
+      return scored
+        .filter((current, i) => !scored.some((other, j) => {
+          if (i === j) return false;
+          if (other.key.length <= current.key.length) return false;
+          return other.key.startsWith(current.key) || other.key.endsWith(current.key);
+        }))
+        .map((m) => m.raw);
+    };
+
     const buildPrinterBlock = (models) => {
-      const normalizedModels = collapseModelPrefixes(uniq((models || []).map((m) => norm(m))));
-      return norm([printerBrandBlock, ...normalizedModels, bracketBlock].filter(Boolean).join(' '));
+      const normalizedModels = keepMostSpecificModels(
+        collapseModelPrefixes(uniq((models || []).map((m) => norm(m))))
+      );
+      return collapseAdjacentRepeatedPhrases(
+        norm([printerBrandBlock, ...normalizedModels, bracketBlock].filter(Boolean).join(' '))
+      );
     };
 
     const buildCandidates = (models) => {
@@ -1166,19 +1280,63 @@ export default class RuleEngine {
       return candidates.filter(Boolean);
     };
 
+    const INVALID_SCORE = 1_000_000;
+
+    const scoreCandidate = (rawTitle, models) => {
+      const collapsed = collapseAdjacentRepeatedPhrases(rawTitle);
+      const title = truncateToMax(collapsed, MAX_LEN);
+      const titleLower = title.toLowerCase();
+      const compactTitle = compactAlphaNum(title);
+
+      const hasKompatibel = /kompatibel\s+für/i.test(title);
+      const hasBrand = !printerBrandBlock || titleLower.includes(printerBrandBlock.toLowerCase());
+      const hasCategory = !category || titleLower.includes(String(category).toLowerCase());
+
+      const cartTokens = cartridgeModels
+        .map((cm) => compactAlphaNum(cm))
+        .filter((token) => token.length >= 3);
+      const presentCartCount = cartTokens.filter((token) => compactTitle.includes(token)).length;
+      const hasAnyCartridge = cartTokens.length === 0 || presentCartCount > 0;
+
+      const modelTokens = uniq((models || []).map((m) => compactAlphaNum(m))).filter((token) => token.length >= 3);
+      const presentModelCount = modelTokens.filter((token) => compactTitle.includes(token)).length;
+      const hasAnyModel = modelTokens.length === 0 || presentModelCount > 0;
+
+      if (
+        !hasKompatibel ||
+        !hasAnyCartridge ||
+        !hasBrand ||
+        !hasCategory ||
+        !hasAnyModel
+      ) {
+        return { title, score: INVALID_SCORE };
+      }
+
+      const lengthScore = scoreTitle(title, MIN_LEN, MAX_LEN, IDEAL);
+      const missingCartridges = Math.max(0, Math.min(2, cartTokens.length) - Math.min(2, presentCartCount));
+      const missingModels = Math.max(0, Math.min(2, modelTokens.length) - Math.min(2, presentModelCount));
+      const completenessPenalty = missingCartridges * 15 + missingModels * 20;
+
+      return {
+        title,
+        score: lengthScore + completenessPenalty
+      };
+    };
+
     let best = { title: '', score: Infinity, keep: pm.length, all: [] };
     let bestScored = [];
-    for (let keep = pm.length; keep >= 0; keep -= 1) {
+    const minKeep = pm.length > 0 ? 1 : 0;
+    for (let keep = pm.length; keep >= minKeep; keep -= 1) {
       const models = pm.slice(0, keep);
       const cands = buildCandidates(models);
       const hasModels = models.length > 0;
       const scored = cands.map((raw) => {
         const padded = padIfShort(raw, MIN_LEN, MAX_LEN, hasModels);
-        const title = truncateToMax(padded, MAX_LEN);
+        const { title, score } = scoreCandidate(padded, models);
         return {
           raw,
           title,
-          score: scoreTitle(title, MIN_LEN, MAX_LEN, IDEAL)
+          score
         };
       });
       const localBest = scored.reduce(
@@ -1188,6 +1346,7 @@ export default class RuleEngine {
             : acc,
         { title: '', score: Infinity }
       );
+      if (localBest.score >= INVALID_SCORE) continue;
       if (
         localBest.score < best.score ||
         (localBest.score === best.score && localBest.title.length > (best.title || '').length)
@@ -1200,15 +1359,16 @@ export default class RuleEngine {
 
     const fallbackCandidates = buildCandidates(pm).map((raw) => {
       const padded = padIfShort(raw, MIN_LEN, MAX_LEN, pm.length > 0);
-      const title = truncateToMax(padded, MAX_LEN);
-      return { raw, title, score: scoreTitle(title, MIN_LEN, MAX_LEN, IDEAL) };
+      const { title, score } = scoreCandidate(padded, pm);
+      return { raw, title, score };
     });
-    const fallbackTitle = fallbackCandidates[0]?.title || norm(originalTitle);
-    const newTitle = best.title || fallbackTitle;
+    const fallbackTitle = truncateToMax(norm(originalTitle), MAX_LEN);
+    const newTitle = best.score < INVALID_SCORE ? best.title : fallbackTitle;
     const candidatePool = bestScored.length ? bestScored : fallbackCandidates;
     const allCandidates = [];
     const seen = new Set();
     candidatePool
+      .filter((entry) => entry.score < INVALID_SCORE)
       .sort((a, b) => a.score - b.score || b.title.length - a.title.length)
       .forEach((entry) => {
         const key = entry.title.toLowerCase();

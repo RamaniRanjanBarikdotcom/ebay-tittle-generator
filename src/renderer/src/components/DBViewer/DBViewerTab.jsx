@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Badge,
   Button,
+  Input,
   Popconfirm,
   Segmented,
   Spin,
@@ -12,6 +12,7 @@ import {
 import {
   DatabaseOutlined,
   DeleteOutlined,
+  SearchOutlined,
   ReloadOutlined,
   TableOutlined,
   InboxOutlined
@@ -118,6 +119,7 @@ export default function DBViewerTab({ isAdmin }) {
   const [dataLoading, setDataLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50, total: 0 });
+  const [searchText, setSearchText] = useState('');
 
   const loadTables = useCallback(async (source) => {
     setTablesLoading(true);
@@ -137,15 +139,15 @@ export default function DBViewerTab({ isAdmin }) {
     }
   }, []);
 
-  const loadTableData = useCallback(async (tableName, page = 1, pageSize = 50, source) => {
+  const loadTableData = useCallback(async (tableName, page = 1, pageSize = 50, source, search = '') => {
     if (!tableName) return;
     setDataLoading(true);
     setSelectedRowKeys([]);
     try {
       const result =
         source === 'mysql'
-          ? await window.api.getAppDbTableData({ table: tableName, page, pageSize })
-          : await window.api.getLocalDbTableData({ table: tableName, page, pageSize });
+          ? await window.api.getAppDbTableData({ table: tableName, page, pageSize, search })
+          : await window.api.getLocalDbTableData({ table: tableName, page, pageSize, search });
       if (result.success) {
         const { rows, total, columns: cols } = result.data;
         setTableData(rows || []);
@@ -165,9 +167,13 @@ export default function DBViewerTab({ isAdmin }) {
 
   useEffect(() => {
     if (selectedTable) {
-      loadTableData(selectedTable, 1, pagination.pageSize, dbSource);
+      loadTableData(selectedTable, 1, pagination.pageSize, dbSource, searchText);
     }
   }, [selectedTable]);
+
+  useEffect(() => {
+    setSearchText('');
+  }, [dbSource, selectedTable]);
 
   const handleDelete = async () => {
     if (!selectedRowKeys.length || !selectedTable) return;
@@ -413,6 +419,24 @@ export default function DBViewerTab({ isAdmin }) {
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Input.Search
+                    allowClear
+                    size="small"
+                    value={searchText}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setSearchText(value);
+                      if (!value.trim()) {
+                        loadTableData(selectedTable, 1, pagination.pageSize, dbSource, '');
+                      }
+                    }}
+                    onSearch={(value) =>
+                      loadTableData(selectedTable, 1, pagination.pageSize, dbSource, value)
+                    }
+                    prefix={<SearchOutlined />}
+                    placeholder="Search item / SKU / title..."
+                    style={{ width: 260 }}
+                  />
                   {canDelete && (
                     <Popconfirm
                       title={`Delete ${selectedRowKeys.length} selected row(s)?`}
@@ -438,7 +462,7 @@ export default function DBViewerTab({ isAdmin }) {
                     icon={<ReloadOutlined />}
                     loading={dataLoading}
                     onClick={() =>
-                      loadTableData(selectedTable, pagination.current, pagination.pageSize, dbSource)
+                      loadTableData(selectedTable, pagination.current, pagination.pageSize, dbSource, searchText)
                     }
                     style={{ fontSize: 12 }}
                   >
@@ -473,7 +497,7 @@ export default function DBViewerTab({ isAdmin }) {
                       `${range[0]}–${range[1]} of ${total.toLocaleString()} rows`,
                     onChange: (page, pageSize) => {
                       setPagination((p) => ({ ...p, current: page, pageSize }));
-                      loadTableData(selectedTable, page, pageSize, dbSource);
+                      loadTableData(selectedTable, page, pageSize, dbSource, searchText);
                     },
                     style: { padding: '10px 16px' }
                   }}

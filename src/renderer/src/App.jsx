@@ -33,6 +33,7 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('app_theme') || 'light');
   const [systemLanguage, setSystemLanguage] = useState('de');
   const [automationMode, setAutomationMode] = useState('manual');
+  const [generateCache, setGenerateCache] = useState({ extractedRows: [], summary: null });
   const [auth, setAuth] = useState({ loading: true, token: '', user: null });
   const t = useMemo(() => getTranslator(systemLanguage), [systemLanguage]);
   const isAdmin = auth.user?.role === 'admin';
@@ -45,9 +46,9 @@ export default function App() {
     { key: 'export', icon: <ExportOutlined />, label: t('menu.export') },
     { key: 'history', icon: <HistoryOutlined />, label: t('menu.history') },
     { key: 'logs', icon: <FileTextOutlined />, label: t('menu.logs') },
+    { key: 'dbviewer', icon: <DatabaseOutlined />, label: 'DB Viewer' },
     ...(isAdmin
       ? [
-          { key: 'dbviewer', icon: <DatabaseOutlined />, label: 'DB Viewer' },
           { key: 'settings', icon: <SettingOutlined />, label: t('menu.settings') }
         ]
       : [])
@@ -70,6 +71,16 @@ export default function App() {
         }
       }
     });
+  }, []);
+
+  useEffect(() => {
+    if (!window.api?.onProgress) return undefined;
+    const cleanup = window.api.onProgress((data) => {
+      if (data.scope === 'import' && data.percent === 100) {
+        setGenerateCache({ extractedRows: [], summary: null });
+      }
+    });
+    return cleanup;
   }, []);
 
   useEffect(() => {
@@ -226,6 +237,8 @@ export default function App() {
             <GenerateTab
               t={t}
               systemLanguage={systemLanguage}
+              generateCache={generateCache}
+              setGenerateCache={setGenerateCache}
               onViewReview={() => setActiveKey('review')}
             />
           )}
@@ -233,7 +246,7 @@ export default function App() {
           {activeKey === 'export' && <ExportTab t={t} systemLanguage={systemLanguage} />}
           {activeKey === 'history' && <HistoryTab t={t} />}
           {activeKey === 'logs' && <LogsTab t={t} isAdmin={isAdmin} />}
-          {activeKey === 'dbviewer' && isAdmin && <DBViewerTab isAdmin={isAdmin} />}
+          {activeKey === 'dbviewer' && <DBViewerTab isAdmin={isAdmin} />}
           {activeKey === 'settings' && isAdmin && (
             <SettingsTab
               t={t}

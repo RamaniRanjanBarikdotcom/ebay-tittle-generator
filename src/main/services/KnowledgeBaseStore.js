@@ -90,6 +90,7 @@ function toElements(row) {
     safeJsonParse(row.printer_models, [])
   );
   return {
+    title: row.title || '',
     itemNumber: row.item_number || '',
     sku: row.sku || '',
     category: row.category || 'Toner',
@@ -126,7 +127,16 @@ function overlapScore(a = [], b = []) {
   left.forEach((x) => {
     if (right.has(x)) inter += 1;
   });
-  return inter / Math.max(left.size, right.size);
+  // Use min(left, right) so that partial matches aren't penalized when one side has extra items.
+  // e.g. extracted=["0263B002"] vs KB=["FX-10","0263B002"] → 1/min(1,2) = 1.0 instead of 0.5
+  return inter / Math.min(left.size, right.size);
+}
+
+// Strip variant info after "|" from title — matches what KnowledgeBaseImporter does during import.
+function normalizeKnowledgeTitleForMatch(value) {
+  let s = String(value || '');
+  if (s.includes('|')) s = s.split('|')[0];
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 export default class KnowledgeBaseStore {
@@ -439,17 +449,57 @@ export default class KnowledgeBaseStore {
     return rows.map((row) => toElements(row)).filter(Boolean);
   }
 
-  static rectifyElementsByKnowledgeBase(title, extracted, entries = null) {
-    const titleNorm = normalizeKnowledgeTitle(title);
+  static rectifyElementsByKnowledgeBase(title, extracted, entries = null, identifiers = null) {
+    // Strip "|" variant suffix for matching — KB importer does the same during import.
+    const titleNorm = normalizeKnowledgeTitleForMatch(title);
     const source = Array.isArray(entries) ? entries : this.getAllEntries();
     if (!source.length) return { elements: extracted, corrected: false, reason: 'kb_empty', score: 0 };
+
+    // ── Identifier-based matching (SKU / item_number) ──────────────────
+    // If the product has a SKU or item_number that matches a KB entry, use it directly.
+    const prodSku = normalizeToken(identifiers?.sku || extracted?.sku || '');
+    const prodItem = normalizeToken(identifiers?.itemNumber || extracted?.itemNumber || '');
+    let identifierMatch = null;
+    if (prodSku || prodItem) {
+      for (const entry of source) {
+        const entrySku = normalizeToken(entry?.sku || '');
+        const entryItem = normalizeToken(entry?.itemNumber || '');
+        if (prodSku && entrySku && prodSku === entrySku) { identifierMatch = entry; break; }
+        if (prodItem && entryItem && prodItem === entryItem) { identifierMatch = entry; break; }
+      }
+    }
+
+    // Series-only names: these are NOT real specific printer models — just series/family names.
+    // Used to decide whether extraction actually found concrete models or just bare series names.
+    const SERIES_ONLY_NAMES = new Set([
+      'MFC', 'DCP', 'HL', 'FAX', 'MFC-L', 'DCP-L', 'HL-L',
+      'DESKJET', 'ENVY', 'PIXMA', 'LASER', 'ECOSYS', 'LASER MFP',
+      'OFFICEJET', 'OFFICEJET PRO', 'PHOTOSMART', 'PHOTOSMART PREMIUM',
+      'LASERJET', 'LASERJET PRO', 'COLOR LASERJET', 'COLOR LASERJET PRO'
+    ]);
+
+    // Check if extracted models are all just series names (no real specific models with digits)
+    const extractedOnlySeriesNames = (extracted?.printerModels || []).length > 0 &&
+      (extracted?.printerModels || []).every((m) => {
+        const upper = String(m || '').trim().toUpperCase();
+        return !upper || SERIES_ONLY_NAMES.has(upper) || !/\d/.test(upper);
+      });
 
     let best = null;
     let bestScore = 0;
     let bestMeta = null;
+
+    // If we found an identifier match, use it as the best with a guaranteed high score.
+    if (identifierMatch) {
+      best = identifierMatch;
+      bestScore = 200;
+      bestMeta = { exactTitleMatch: false, modelOverlap: 0, identifierMatch: true };
+    }
+
+    // Still run scoring loop — a higher-scoring entry (e.g. exact title match) can override identifier match.
     for (const entry of source) {
       let score = 0;
-      const entryTitleNorm = normalizeKnowledgeTitle(entry?.title || '');
+      const entryTitleNorm = normalizeKnowledgeTitleForMatch(entry?.title || '');
       const exactTitleMatch = Boolean(entryTitleNorm && entryTitleNorm === titleNorm);
       if (exactTitleMatch) score += 100;
 
@@ -467,9 +517,10 @@ export default class KnowledgeBaseStore {
       score += Math.round(modelOverlap * 30);
 
       // Prevent wrong KB row takeover when cartridge+brand are same but printer models differ.
+      // BUT: don't skip if extracted only has series names (e.g. "OfficeJet Pro") — KB needs to fill real models.
       const hasExtractedModels = (extracted?.printerModels || []).length > 0;
       const hasEntryModels = (entry?.printerModels || []).length > 0;
-      if (!exactTitleMatch && hasExtractedModels && hasEntryModels && modelOverlap === 0) {
+      if (!exactTitleMatch && hasExtractedModels && !extractedOnlySeriesNames && hasEntryModels && modelOverlap === 0) {
         continue;
       }
 
@@ -484,26 +535,74 @@ export default class KnowledgeBaseStore {
       }
     }
 
-    if (!best || bestScore < 60) {
+    if (!best || bestScore < 40) {
       return { elements: extracted, corrected: false, reason: 'no_strong_match', score: bestScore };
     }
 
+    const PADDING_MODEL_WORDS = new Set(['DRUCKERMODELL', 'DRUCKERPATRONE', 'DRUCKERMODELLE']);
+    // Check if extraction found REAL specific models (with digits), not just series names
+    const extractedRealModels = (extracted.printerModels || []).filter((m) => {
+      const upper = String(m || '').trim().toUpperCase();
+      return upper && !SERIES_ONLY_NAMES.has(upper) && /\d/.test(upper);
+    });
+    const extractedHasRealModels = extractedRealModels.length > 0;
+    // Allow KB models when:
+    // 1. Exact title match (KB entry matches this product's title exactly), OR
+    // 2. There's model overlap between extracted and KB models, OR
+    // 3. Extraction has NO real models (just series names) — KB fills the gap, OR
+    // 4. Identifier match (SKU/item_number) — trusted direct match
     const allowModelOverride = Boolean(
-      bestMeta?.exactTitleMatch || (bestMeta?.modelOverlap || 0) > 0
+      bestMeta?.exactTitleMatch ||
+      bestMeta?.identifierMatch ||
+      (bestMeta?.modelOverlap || 0) > 0 ||
+      !extractedHasRealModels
     );
+
+    // Build cartridge suffix set from both extracted and KB cartridge models
+    const allCartridges = [
+      ...(extracted.cartridgeModels || []),
+      ...(best.cartridgeModels || [])
+    ];
+    const cartSuffixSet = new Set();
+    for (const c of allCartridges) {
+      const s = String(c || '').trim().toUpperCase();
+      if (!s) continue;
+      // Extract numeric+letter suffix: "LC-223Y" → "223Y", "LC-223BK" → "223BK"
+      const m = s.match(/(\d{2,4}[A-Z]{0,3})$/);
+      if (m) cartSuffixSet.add(m[1]);
+      // Also add the stripped alphanumeric form
+      cartSuffixSet.add(s.replace(/[^A-Z0-9]/g, ''));
+    }
+
+    // Filter out KB printer models that are padding words, have no digits, or are cartridge suffixes
+    const cleanKbModels = (best.printerModels || []).filter((m) => {
+      const upper = String(m || '').trim().toUpperCase();
+      if (!upper) return false;
+      if (PADDING_MODEL_WORDS.has(upper)) return false;
+      if (!/\d/.test(upper)) return false;
+      // Reject models that are just a cartridge suffix (e.g. "223Y DW", "223BK")
+      const core = upper.replace(/\s+[A-Z]{1,3}$/, ''); // "223Y DW" → "223Y"
+      if (cartSuffixSet.has(core)) return false;
+      return true;
+    });
+
+    // Prefer extracted category; only fall back to KB if extracted is empty
+    // Normalize "Tinte" → "Tintenpatrone"
+    let correctedCategory = extracted.category || best.category || '';
+    if (/^tinte$/i.test(correctedCategory)) correctedCategory = 'Tintenpatrone';
 
     const corrected = {
       ...extracted,
-      category: best.category || extracted.category,
+      category: correctedCategory,
       cartridgeModels: (best.cartridgeModels || []).length ? best.cartridgeModels : (extracted.cartridgeModels || []),
       printerBrand: best.printerBrand || extracted.printerBrand,
       series: best.series || extracted.series,
-      printerModels: allowModelOverride && (best.printerModels || []).length
-        ? best.printerModels
+      printerModels: allowModelOverride && cleanKbModels.length
+        ? cleanKbModels
         : (extracted.printerModels || []),
       setOf: best.setOf || extracted.setOf,
       qty: best.qty || extracted.qty,
-      color: best.color || extracted.color,
+      color: extracted.color || best.color || '',
       verification: {
         status: 'ok',
         confidence: Math.min(100, 85 + Math.round(Math.min(15, bestScore / 5))),

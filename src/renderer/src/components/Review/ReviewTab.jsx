@@ -9,12 +9,22 @@ function getMax(marketplace) {
   return MARKETPLACE_MAX[marketplace] || 80;
 }
 
+function formatEuro(value) {
+  const n = Number(value);
+  if (Number.isNaN(n)) return 'n/a';
+  return new Intl.NumberFormat('de-DE', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(n);
+}
+
 export default function ReviewTab({ t }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [savingAll, setSavingAll] = useState(false);
   const [saveProgress, setSaveProgress] = useState(0);
   const [marketplaceFilter, setMarketplaceFilter] = useState('ebay');
+  const [search, setSearch] = useState('');
 
   const titleMap = useMemo(() => {
     const map = new Map();
@@ -47,8 +57,24 @@ export default function ReviewTab({ t }) {
   }, []);
 
   const filteredRows = useMemo(
-    () => rows.filter((r) => (r.marketplace || 'ebay') === marketplaceFilter),
-    [rows, marketplaceFilter]
+    () =>
+      rows.filter((r) => {
+        if ((r.marketplace || 'ebay') !== marketplaceFilter) return false;
+        const q = search.trim().toLowerCase();
+        if (!q) return true;
+        const haystack = [
+          r.item_number,
+          r.sku,
+          r.title,
+          r.original_title,
+          r.marketplace
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(q);
+      }),
+    [rows, marketplaceFilter, search]
   );
 
   const handleTitleChange = (id, value) => {
@@ -171,6 +197,14 @@ export default function ReviewTab({ t }) {
                 Max {getMax(marketplaceFilter)} chars
               </Tag>
             )}
+            <Input.Search
+              allowClear
+              placeholder="Search review titles..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onSearch={setSearch}
+              style={{ width: 320 }}
+            />
           </Space>
           {savingAll && (
             <Progress percent={saveProgress} size="small" status="active" style={{ width: 300 }} />
@@ -193,6 +227,7 @@ export default function ReviewTab({ t }) {
                 title: 'Price Plan',
                 width: 170,
                 render: (_, record) => {
+<<<<<<< HEAD
                   const oldPrice = parseLooseNumber(record.price);
                   const sold = parseLooseNumber(record.sold_count);
                   const nextPrice = parseLooseNumber(record.suggested_price);
@@ -205,6 +240,16 @@ export default function ReviewTab({ t }) {
                     );
                   }
                   return <Tag color="green">{formatDecimalDE(oldPrice, { fallback: '-' })}</Tag>;
+=======
+                  const oldPrice = Number(record.price);
+                  const sold = Number(record.sold_count);
+                  const nextPrice = Number(record.suggested_price);
+                  if (Number.isNaN(oldPrice)) return <Tag>n/a</Tag>;
+                  if (!Number.isNaN(sold) && sold === 0 && !Number.isNaN(nextPrice)) {
+                    return <Tag color="orange">{formatEuro(oldPrice)} {'->'} {formatEuro(nextPrice)}</Tag>;
+                  }
+                  return <Tag color="green">{formatEuro(oldPrice)}</Tag>;
+>>>>>>> new-fix
                 }
               },
               {

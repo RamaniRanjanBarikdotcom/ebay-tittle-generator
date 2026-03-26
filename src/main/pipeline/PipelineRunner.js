@@ -6,7 +6,7 @@ import TitleSanitizer from '../title-engine/TitleSanitizer.js';
 import TitleGenerator from '../title-engine/TitleGenerator.js';
 import { hashTitle } from '../../shared/utils/hash.js';
 import TitleHistory from '../database/models/TitleHistory.js';
-import KnowledgeBaseStore, { normalizeKnowledgeTitle } from '../services/KnowledgeBaseStore.js';
+import KnowledgeBaseStore from '../services/KnowledgeBaseStore.js';
 import { parseVariation, extractVariationDetails } from '../services/variationParser.js';
 
 const MARKETPLACES = ['ebay', 'amazon', 'kaufland', 'otto'];
@@ -14,7 +14,7 @@ const PRICE_DELTA = 0.02;
 
 // Bump this string whenever RuleEngine extraction logic changes.
 // All cached extracted_elements rows with a different version will be re-extracted.
-const EXTRACTION_CACHE_VERSION = 'v4-2026-03';
+const EXTRACTION_CACHE_VERSION = 'v10-2026-03-26';
 
 function parseLooseNumber(value) {
   if (value === null || value === undefined) return NaN;
@@ -39,6 +39,19 @@ function parseLooseNumber(value) {
 
   const parsed = Number(text);
   return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function normalizeKompatibelConnector(title) {
+  let out = TitleSanitizer.sanitize(title || '');
+  if (!out) return out;
+  if (/kompatibel\s+für/i.test(out)) return out;
+  if (/kompatibel/i.test(out)) {
+    return out.replace(/\bkompatibel\b/i, 'Kompatibel für');
+  }
+  if (/\bfür\b/i.test(out)) {
+    return out.replace(/\bfür\b/i, 'Kompatibel für');
+  }
+  return out;
 }
 
 function isSoldCountZero(value) {
@@ -205,7 +218,6 @@ export default class PipelineRunner {
         'manual_import'
       );
     });
-    const kbMap = KnowledgeBaseStore.getByTitles(zeroSoldProducts.map((p) => p.original_title || ''));
     const kbEntries = KnowledgeBaseStore.getAllEntries();
 
     let generatedCount = 0;
@@ -224,6 +236,7 @@ export default class PipelineRunner {
     // Delete stale titles for this product+marketplace before inserting fresh ones.
     // This ensures re-running the pipeline always replaces old titles rather than
     // accumulating duplicates via INSERT OR IGNORE.
+<<<<<<< HEAD
     const deleteHistoryForProduct = db.prepare(
       `DELETE FROM title_history
        WHERE generated_title_id IN (
@@ -234,6 +247,13 @@ export default class PipelineRunner {
 
     const deleteStaleForProduct = db.prepare(
       'DELETE FROM generated_titles WHERE product_id = ? AND marketplace = ? AND session_id IS ?'
+=======
+    const nullifyHistoryRefs = db.prepare(
+      'UPDATE title_history SET generated_title_id = NULL WHERE generated_title_id IN (SELECT id FROM generated_titles WHERE product_id = ? AND marketplace = ?)'
+    );
+    const deleteStaleForProduct = db.prepare(
+      'DELETE FROM generated_titles WHERE product_id = ? AND marketplace = ?'
+>>>>>>> new-fix
     );
 
     const updatePriceAnalysis = db.prepare(
@@ -294,21 +314,17 @@ export default class PipelineRunner {
         if (!shouldRefreshExtraction && cachedRow) {
           elements = deserializeElements(cachedRow);
         } else {
-          const kbElements = kbMap.get(normalizeKnowledgeTitle(product.original_title || '')) || null;
-          if (kbElements) {
-            elements = kbElements;
-          } else {
-            const generated = RuleEngine.generate({
-              title: product.original_title,
-              sku: product.sku || ''
-            });
-            const rectified = KnowledgeBaseStore.rectifyElementsByKnowledgeBase(
-              product.original_title || '',
-              generated.elements,
-              kbEntries
-            );
-            elements = rectified.corrected ? rectified.elements : generated.elements;
-          }
+          const generated = RuleEngine.generate({
+            title: product.original_title,
+            sku: product.sku || ''
+          });
+          const rectified = KnowledgeBaseStore.rectifyElementsByKnowledgeBase(
+            product.original_title || '',
+            generated.elements,
+            kbEntries,
+            { sku: product.sku || '', itemNumber: product.item_number || '' }
+          );
+          elements = rectified.corrected ? rectified.elements : generated.elements;
 
           // Parse variation_details from raw_query_data and attach overrides to elements
           const variationDetails = extractVariationDetails(product.raw_query_data);
@@ -352,34 +368,29 @@ export default class PipelineRunner {
           candidates = candidates.filter((c) => (c || '').trim().toLowerCase() !== originalNormalized);
 
           if (!candidates.length && marketplace === 'ebay') {
-            const analysisTitle = TitleSanitizer.sanitizeForAnalysis(product.original_title || '');
-            const forced = TitleGenerator.buildForcedTitle({ analysisTitle, maxLength: 80 });
-            if (forced && forced.trim().toLowerCase() !== originalNormalized) {
-              candidates = [forced];
+            let fallback = normalizeKompatibelConnector(product.original_title || '');
+            if (fallback.length > 80) fallback = TitleGenerator.truncateTitle(fallback, 80);
+            if (fallback) {
+              candidates = [fallback];
               usedFallback = true;
-            }
-            if (!candidates.length) {
-              let fallback = TitleSanitizer.sanitize(product.original_title || '');
-              if (fallback.length > 80) fallback = TitleGenerator.truncateTitle(fallback, 80);
-              if (fallback) { candidates = [fallback]; usedFallback = true; }
             }
           }
 
           // For eBay: "Kompatibel für" is mandatory in EVERY stored variation.
-          // Filter out any candidate that lacks it, then prepend a forced title if needed.
+          // Filter out any candidate that lacks it; do not inject synthetic words.
           if (marketplace === 'ebay' && candidates.length > 0) {
             const hasKompatibel = (c) => /kompatibel\s+für/i.test(c);
             const validCandidates = candidates.filter(hasKompatibel);
-            if (validCandidates.length < candidates.length) {
-              // At least one candidate is missing "Kompatibel für" — rebuild
-              const analysisTitle = TitleSanitizer.sanitizeForAnalysis(product.original_title || '');
-              const forced = TitleGenerator.buildForcedTitle({ analysisTitle, maxLength: 80 });
-              if (forced && hasKompatibel(forced)) {
-                candidates = [forced, ...validCandidates].slice(0, 3);
-              } else if (validCandidates.length > 0) {
-                candidates = validCandidates;
-              }
-              // else: no valid candidates available — keep originals and let stale-delete handle it
+            if (validCandidates.length !== candidates.length) {
+              candidates = validCandidates;
+            }
+          }
+          if (marketplace === 'ebay' && !candidates.length) {
+            let fallback = normalizeKompatibelConnector(product.original_title || '');
+            if (fallback.length > 80) fallback = TitleGenerator.truncateTitle(fallback, 80);
+            if (fallback && /kompatibel\s+für/i.test(fallback)) {
+              candidates = [fallback];
+              usedFallback = true;
             }
           }
 
@@ -395,8 +406,13 @@ export default class PipelineRunner {
 
           // Delete stale titles for this product+marketplace so re-runs always
           // replace old titles rather than leaving duplicates via INSERT OR IGNORE.
+<<<<<<< HEAD
           deleteHistoryForProduct.run(product.id, marketplace, sessionId || null);
           deleteStaleForProduct.run(product.id, marketplace, sessionId || null);
+=======
+          nullifyHistoryRefs.run(product.id, marketplace);
+          deleteStaleForProduct.run(product.id, marketplace);
+>>>>>>> new-fix
 
           titlesToInsert.forEach((title, idx) => {
             const titleHash = hashTitle(`${title}||${marketplace}||${product.id}||${idx}`);

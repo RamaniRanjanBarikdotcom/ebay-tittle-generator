@@ -1,15 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Card, Space, Tag, message, Progress, Table } from 'antd';
+import { Button, Card, Space, Tag, message, Progress, Table, Input, Select } from 'antd';
 import { ThunderboltOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
 
-export default function GenerateTab({ t, systemLanguage, onViewReview }) {
+export default function GenerateTab({ t, systemLanguage, generateCache, setGenerateCache, onViewReview }) {
   const [loadingGenerate, setLoadingGenerate] = useState(false);
   const [loadingExtract, setLoadingExtract] = useState(false);
-  const [summary, setSummary] = useState(null);
   const [progress, setProgress] = useState(null);
   const [products, setProducts] = useState([]);
-  const [extractedRows, setExtractedRows] = useState([]);
   const [generatedRows, setGeneratedRows] = useState([]);
+  const [extractedSearch, setExtractedSearch] = useState('');
+  const [generatedSearch, setGeneratedSearch] = useState('');
+  const [generatedMarketplace, setGeneratedMarketplace] = useState('ebay');
+  const extractedRows = generateCache?.extractedRows || [];
+  const summary = generateCache?.summary || null;
   const extractionComplete = products.length > 0 && extractedRows.length === products.length;
 
   const loadProducts = async () => {
@@ -32,7 +35,7 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
         return;
       }
       const rows = result.data?.extracted || [];
-      setExtractedRows(rows);
+      setGenerateCache((prev) => ({ ...(prev || {}), extractedRows: rows }));
       message.success(`Extracted elements for ${result.data?.total || rows.length} products`);
     } catch (error) {
       setLoadingExtract(false);
@@ -129,7 +132,7 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
         return;
       }
 
-      setSummary(result.data);
+      setGenerateCache((prev) => ({ ...(prev || {}), summary: result.data }));
       await loadGenerated();
       message.success(t('messages.generateSuccess'));
       if (onViewReview) onViewReview();
@@ -148,9 +151,7 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
           setProgress(data);
         }
         if (data.scope === 'import' && data.percent === 100) {
-          setExtractedRows([]);
           setGeneratedRows([]);
-          setSummary(null);
           loadProducts();
         }
       });
@@ -190,6 +191,27 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
     [extractedRows]
   );
 
+  const filteredExtractedTableRows = useMemo(() => {
+    const q = extractedSearch.trim().toLowerCase();
+    if (!q) return extractedTableRows;
+    return extractedTableRows.filter((row) => {
+      const haystack = [
+        row.item_number,
+        row.sku,
+        row.old_title,
+        row.category,
+        row.printer_brand,
+        row.cartridge_models,
+        row.printer_models,
+        row.color
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [extractedTableRows, extractedSearch]);
+
   const generatedWithExtraction = useMemo(
     () =>
       generatedRows.map((row, index) => {
@@ -200,6 +222,7 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
             `generated-${row.product_id || 'product'}-${row.variation_number || 'var'}-${index}`,
           item_number: row.item_number,
           sku: row.sku,
+          marketplace: row.marketplace || 'ebay',
           old_title: row.original_title,
           new_title: row.title,
           variation_number: row.variation_number,
@@ -220,6 +243,28 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
       }),
     [generatedRows, extractedByProductId]
   );
+
+  const filteredGeneratedWithExtraction = useMemo(() => {
+    const q = generatedSearch.trim().toLowerCase();
+    return generatedWithExtraction.filter((row) => {
+      if (generatedMarketplace !== 'all' && row.marketplace !== generatedMarketplace) return false;
+      if (!q) return true;
+      const haystack = [
+        row.item_number,
+        row.sku,
+        row.marketplace,
+        row.old_title,
+        row.new_title,
+        row.cartridge_models,
+        row.printer_models,
+        row.color
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [generatedWithExtraction, generatedSearch, generatedMarketplace]);
 
   return (
     <div className="panel">
@@ -306,15 +351,25 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
         <Card
           title={
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>Extracted Elements ({extractedRows.length})</span>
-              <Button
-                size="small"
-                icon={<DownloadOutlined />}
-                disabled={!extractedRows.length}
-                onClick={handleExportExtracted}
-              >
-                Export CSV
-              </Button>
+              <span>Extracted Elements ({filteredExtractedTableRows.length}/{extractedRows.length})</span>
+              <Space size={8} wrap>
+                <Input.Search
+                  allowClear
+                  placeholder="Search extracted rows..."
+                  value={extractedSearch}
+                  onChange={(e) => setExtractedSearch(e.target.value)}
+                  onSearch={setExtractedSearch}
+                  style={{ width: 260 }}
+                />
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  disabled={!extractedRows.length}
+                  onClick={handleExportExtracted}
+                >
+                  Export CSV
+                </Button>
+              </Space>
             </div>
           }
           variant="outlined"
@@ -323,7 +378,7 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
             <Table
               size="small"
               rowKey="__rowKey"
-              dataSource={extractedTableRows}
+              dataSource={filteredExtractedTableRows}
               pagination={{ pageSize: 10 }}
               scroll={{ x: true, y: 320 }}
               columns={[
@@ -355,15 +410,40 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
         <Card
           title={
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>Generated Titles + Extraction ({generatedWithExtraction.length})</span>
-              <Button
-                size="small"
-                icon={<DownloadOutlined />}
-                disabled={!generatedWithExtraction.length}
-                onClick={handleExportGenerated}
-              >
-                Export CSV
-              </Button>
+              <span>
+                Generated Titles + Extraction ({filteredGeneratedWithExtraction.length}/
+                {generatedWithExtraction.length})
+              </span>
+              <Space size={8} wrap>
+                <Select
+                  value={generatedMarketplace}
+                  onChange={setGeneratedMarketplace}
+                  style={{ width: 150 }}
+                  options={[
+                    { value: 'all', label: 'All Marketplaces' },
+                    { value: 'ebay', label: 'eBay' },
+                    { value: 'amazon', label: 'Amazon' },
+                    { value: 'kaufland', label: 'Kaufland' },
+                    { value: 'otto', label: 'Otto' }
+                  ]}
+                />
+                <Input.Search
+                  allowClear
+                  placeholder="Search generated rows..."
+                  value={generatedSearch}
+                  onChange={(e) => setGeneratedSearch(e.target.value)}
+                  onSearch={setGeneratedSearch}
+                  style={{ width: 260 }}
+                />
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  disabled={!generatedWithExtraction.length}
+                  onClick={handleExportGenerated}
+                >
+                  Export CSV
+                </Button>
+              </Space>
             </div>
           }
           variant="outlined"
@@ -372,12 +452,13 @@ export default function GenerateTab({ t, systemLanguage, onViewReview }) {
             <Table
               size="small"
               rowKey="__rowKey"
-              dataSource={generatedWithExtraction}
+              dataSource={filteredGeneratedWithExtraction}
               pagination={{ pageSize: 10 }}
               scroll={{ x: true, y: 320 }}
               columns={[
                 { title: 'Item', dataIndex: 'item_number', width: 120 },
                 { title: 'SKU', dataIndex: 'sku', width: 140 },
+                { title: 'Marketplace', dataIndex: 'marketplace', width: 110 },
                 { title: 'Variation', dataIndex: 'variation_number', width: 100 },
                 { title: 'Old title', dataIndex: 'old_title', width: 320 },
                 { title: 'New title', dataIndex: 'new_title', width: 320 },
