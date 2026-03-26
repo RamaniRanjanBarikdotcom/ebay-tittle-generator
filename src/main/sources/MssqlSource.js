@@ -73,7 +73,44 @@ function isZeroSoldCount(value) {
   return Number.isFinite(parsed) && parsed === 0;
 }
 
-function mapRowToProduct(row, sessionId, getPreviousZeroSoldAdjustment) {
+function parseFlexibleNumber(input) {
+  if (input === null || input === undefined) return NaN;
+  if (typeof input === 'number') return Number.isFinite(input) ? input : NaN;
+
+  let text = String(input).trim();
+  if (!text) return NaN;
+  text = text.replace(/[^\d.,\-+]/g, '');
+  if (!text) return NaN;
+
+  const hasComma = text.includes(',');
+  const hasDot = text.includes('.');
+
+  if (hasComma && hasDot) {
+    if (text.lastIndexOf(',') > text.lastIndexOf('.')) {
+      text = text.replace(/\./g, '').replace(/,/g, '.');
+    } else {
+      text = text.replace(/,/g, '');
+    }
+  } else if (hasComma) {
+    const parts = text.split(',');
+    if (parts.length === 2 && parts[1].length <= 3) {
+      text = text.replace(/\./g, '').replace(',', '.');
+    } else {
+      text = text.replace(/,/g, '');
+    }
+  } else if (hasDot) {
+    const parts = text.split('.');
+    if (parts.length > 2) {
+      const last = parts.pop();
+      text = `${parts.join('')}.${last}`;
+    }
+  }
+
+  const value = Number(text);
+  return Number.isFinite(value) ? value : NaN;
+}
+
+function mapRowToProduct(row, sessionId, pricingResolver) {
   const itemNumber = String(
     firstNonEmpty(row, [
       'item_number',
@@ -139,9 +176,9 @@ function mapRowToProduct(row, sessionId, getPreviousZeroSoldAdjustment) {
     'Verkauft'
   ]);
   const quantity = quantityRaw === '' ? null : Number(quantityRaw);
-  const previousAdjustment =
-    getPreviousZeroSoldAdjustment?.get(itemNumber, sku)?.price_adjustment || '';
-  const pricing = calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment });
+  const pricing = pricingResolver
+    ? pricingResolver({ priceRaw, soldCountRaw, itemNumber, sku })
+    : calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment: '' });
   let rawQueryData = null;
   try {
     rawQueryData = JSON.stringify(row || {});
@@ -332,21 +369,47 @@ ORDER BY
       let skippedSoldNotZero = 0;
       let skippedNonPrinter = 0;
       const db = DatabaseManager.getDatabase();
-      const getPreviousZeroSoldAdjustment = db.prepare(
-        `SELECT price_adjustment
-         FROM products
-         WHERE item_number = ?
-           AND sku = ?
-           AND (
-             price_adjustment LIKE 'decrease-0-sold%'
-             OR price_adjustment LIKE 'increase-0-sold%'
-           )
-           AND price_adjustment IS NOT NULL
-         ORDER BY id DESC
-         LIMIT 1`
+      const getImportCount = db.prepare(
+        'SELECT import_count FROM sku_import_counts WHERE sku = ? AND item_number = ? LIMIT 1'
       );
+      const bumpImportCount = db.prepare(
+        `INSERT INTO sku_import_counts (sku, item_number, import_count, last_imported_at)
+         VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+         ON CONFLICT(sku, item_number) DO UPDATE SET
+           import_count = import_count + 1,
+           last_imported_at = CURRENT_TIMESTAMP`
+      );
+      const resolvePricing = ({ priceRaw, soldCountRaw, itemNumber, sku }) => {
+        const price = parseFlexibleNumber(priceRaw);
+        const soldCount = parseFlexibleNumber(soldCountRaw);
+        if (!Number.isFinite(price)) {
+          return calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment: '' });
+        }
+        if (Number.isFinite(soldCount) && soldCount === 0) {
+          const current = getImportCount.get(sku, itemNumber)?.import_count || 0;
+          const nextCount = current + 1;
+          const action = nextCount % 2 !== 0 ? 'decrease' : 'increase';
+          const delta = action === 'decrease' ? -0.02 : 0.02;
+          const suggestedPrice = Math.max(0, Number((price + delta).toFixed(2)));
+          return {
+            price,
+            soldCount,
+            suggestedPrice,
+            adjustment: action === 'decrease' ? 'decrease-0-sold' : 'increase-0-sold-repeat',
+            updateStatus: suggestedPrice !== price ? 'pending' : 'not-required',
+            _bump: true
+          };
+        }
+        return {
+          price,
+          soldCount: Number.isFinite(soldCount) ? soldCount : null,
+          suggestedPrice: price,
+          adjustment: 'unchanged',
+          updateStatus: 'not-required'
+        };
+      };
       rows.forEach((row, index) => {
-        const product = mapRowToProduct(row, sessionId, getPreviousZeroSoldAdjustment);
+        const product = mapRowToProduct(row, sessionId, resolvePricing);
         if (!product) {
           errors.push({ row: index + 1, error: 'Missing required fields: item_number, sku, original_title' });
           return;
@@ -358,6 +421,10 @@ ORDER BY
         if (!isZeroSoldCount(product.sold_count)) {
           skippedSoldNotZero += 1;
           return;
+        }
+        const adj = product.price_adjustment || '';
+        if (adj.startsWith('decrease-0-sold') || adj.startsWith('increase-0-sold')) {
+          bumpImportCount.run(product.sku, product.item_number);
         }
         mapped.push(product);
       });
@@ -456,21 +523,47 @@ ORDER BY
       let skippedSoldNotZero = 0;
       let skippedNonPrinter = 0;
       const db = DatabaseManager.getDatabase();
-      const getPreviousZeroSoldAdjustment = db.prepare(
-        `SELECT price_adjustment
-         FROM products
-         WHERE item_number = ?
-           AND sku = ?
-           AND (
-             price_adjustment LIKE 'decrease-0-sold%'
-             OR price_adjustment LIKE 'increase-0-sold%'
-           )
-           AND price_adjustment IS NOT NULL
-         ORDER BY id DESC
-         LIMIT 1`
+      const getImportCount = db.prepare(
+        'SELECT import_count FROM sku_import_counts WHERE sku = ? AND item_number = ? LIMIT 1'
       );
+      const bumpImportCount = db.prepare(
+        `INSERT INTO sku_import_counts (sku, item_number, import_count, last_imported_at)
+         VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+         ON CONFLICT(sku, item_number) DO UPDATE SET
+           import_count = import_count + 1,
+           last_imported_at = CURRENT_TIMESTAMP`
+      );
+      const resolvePricing = ({ priceRaw, soldCountRaw, itemNumber, sku }) => {
+        const price = parseFlexibleNumber(priceRaw);
+        const soldCount = parseFlexibleNumber(soldCountRaw);
+        if (!Number.isFinite(price)) {
+          return calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment: '' });
+        }
+        if (Number.isFinite(soldCount) && soldCount === 0) {
+          const current = getImportCount.get(sku, itemNumber)?.import_count || 0;
+          const nextCount = current + 1;
+          const action = nextCount % 2 !== 0 ? 'decrease' : 'increase';
+          const delta = action === 'decrease' ? -0.02 : 0.02;
+          const suggestedPrice = Math.max(0, Number((price + delta).toFixed(2)));
+          return {
+            price,
+            soldCount,
+            suggestedPrice,
+            adjustment: action === 'decrease' ? 'decrease-0-sold' : 'increase-0-sold-repeat',
+            updateStatus: suggestedPrice !== price ? 'pending' : 'not-required',
+            _bump: true
+          };
+        }
+        return {
+          price,
+          soldCount: Number.isFinite(soldCount) ? soldCount : null,
+          suggestedPrice: price,
+          adjustment: 'unchanged',
+          updateStatus: 'not-required'
+        };
+      };
       rows.forEach((row, index) => {
-        const product = mapRowToProduct(row, sessionId, getPreviousZeroSoldAdjustment);
+        const product = mapRowToProduct(row, sessionId, resolvePricing);
         if (!product) {
           errors.push({ row: index + 1, error: 'Missing required fields: item_number, sku, original_title' });
           return;
@@ -482,6 +575,10 @@ ORDER BY
         if (!isZeroSoldCount(product.sold_count)) {
           skippedSoldNotZero += 1;
           return;
+        }
+        const adj = product.price_adjustment || '';
+        if (adj.startsWith('decrease-0-sold') || adj.startsWith('increase-0-sold')) {
+          bumpImportCount.run(product.sku, product.item_number);
         }
         mapped.push(product);
       });

@@ -4,11 +4,12 @@
   "productName": "eBay Title Generator",
   "copyright": "Copyright © 2024",
   "directories": {
-    "output": "release"
+    "output": "dist"
   },
   "files": [
-    "out/**/*",
-    "package.json"
+    "out/**",
+    "package.json",
+    "node_modules/**"
   ],
   "extraResources": [
     {

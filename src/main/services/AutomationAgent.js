@@ -1,8 +1,13 @@
+import { existsSync } from 'fs';
+import fs from 'fs/promises';
+import path from 'path';
+import { spawn } from 'child_process';
 import DatabaseManager from '../database/sqlite.js';
 import MssqlSource from '../sources/MssqlSource.js';
 import PipelineRunner from '../pipeline/PipelineRunner.js';
 import ExportRunner from '../pipeline/ExportRunner.js';
 import { decryptText } from '../utils/secureCrypto.js';
+import { fixMojibakeText } from '../utils/textEncoding.js';
 
 const CHECK_INTERVAL_MS = 60 * 1000; // check every minute so custom minute/hour schedules work
 
@@ -12,6 +17,7 @@ class AutomationAgent {
     this.started = false;
     this.statusEmitter = null;
     this.progressEmitter = null;
+    this.settingsSync = null;
     this.status = {
       mode: 'manual',
       enabled: false,
@@ -33,6 +39,10 @@ class AutomationAgent {
 
   setProgressEmitter(fn) {
     this.progressEmitter = fn;
+  }
+
+  setSettingsSync(fn) {
+    this.settingsSync = fn;
   }
 
   emitStatus() {
@@ -64,6 +74,9 @@ class AutomationAgent {
        VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, value_type = excluded.value_type`
     ).run(key, String(value), valueType);
+    if (typeof this.settingsSync === 'function') {
+      this.settingsSync();
+    }
   }
 
   getProfilesState() {
@@ -80,9 +93,138 @@ class AutomationAgent {
       profiles = [];
     }
     return {
-      profiles: profiles.map((p) => ({ ...p, password: decryptText(p.password || '') })),
+      profiles: profiles.map((p) => ({
+        ...p,
+        server: decryptText(p.server || ''),
+        database: decryptText(p.database || ''),
+        user: decryptText(p.user || ''),
+        port: decryptText(p.port || ''),
+        password: decryptText(p.password || '')
+      })),
       activeProfileId
     };
+  }
+
+  getAmeiseSettings() {
+    return {
+      enabled: this.readSetting('ameise_enabled', 'false') === 'true',
+      exePath: this.readSetting('ameise_exe_path', ''),
+      template: this.readSetting('ameise_template', 'IMP1'),
+      archiveFolder: this.readSetting('ameise_archive_folder', '')
+    };
+  }
+
+  async runAmeiseImport(filePath, sessionId) {
+    const settings = this.getAmeiseSettings();
+    if (!settings.enabled) return { skipped: true, reason: 'disabled' };
+    if (!settings.exePath || !existsSync(settings.exePath)) {
+      return { skipped: true, reason: 'missing_exe' };
+    }
+    if (!filePath || !existsSync(filePath)) {
+      return { skipped: true, reason: 'missing_csv' };
+    }
+
+    const { profiles, activeProfileId } = this.getProfilesState();
+    const profile = profiles.find((p) => p.id === activeProfileId);
+    if (!profile) return { skipped: true, reason: 'no_active_profile' };
+    if (String(profile.authentication || 'sql') !== 'sql') {
+      return { skipped: true, reason: 'sql_auth_required' };
+    }
+
+    const args = [
+      '-s',
+      profile.server,
+      '-d',
+      profile.database,
+      '-u',
+      profile.user || '',
+      '-p',
+      profile.password || '',
+      '-t',
+      settings.template || 'IMP1',
+      '-i',
+      filePath
+    ];
+
+    this.logEvent({
+      event: 'export.ameise',
+      message: 'Ameise import started (automation)',
+      details: { filePath, template: settings.template },
+      sessionId
+    });
+
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
+        const child = spawn(settings.exePath, args, { windowsHide: true });
+        let stderr = '';
+        let stdout = '';
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk.toString('latin1');
+        });
+        child.stdout?.on('data', (chunk) => {
+          stdout += chunk.toString('latin1');
+        });
+        child.on('error', reject);
+        child.on('exit', (code) => {
+          if (code === 0) return resolve({ code, stdout, stderr });
+          const err = new Error(stderr || stdout || `Ameise exited with code ${code}`);
+          err.exitCode = code;
+          err.stderr = stderr;
+          err.stdout = stdout;
+          return reject(err);
+        });
+      });
+    } catch (error) {
+      this.logEvent({
+        level: 'error',
+        event: 'export.ameise',
+        message: 'Ameise import failed (automation)',
+        details: {
+          filePath,
+          template: settings.template,
+          error: error.message,
+          exitCode: error.exitCode,
+          stderr: fixMojibakeText(error.stderr || ''),
+          stdout: fixMojibakeText(error.stdout || '')
+        },
+        sessionId
+      });
+      throw error;
+    }
+
+    let movedTo = null;
+    const archiveRoot = settings.archiveFolder
+      ? settings.archiveFolder
+      : path.join(path.dirname(filePath), 'abgearbeitet');
+    await fs.mkdir(archiveRoot, { recursive: true });
+    const dest = path.join(archiveRoot, path.basename(filePath));
+    try {
+      await fs.rename(filePath, dest);
+    } catch (error) {
+      if (error.code === 'EXDEV') {
+        await fs.copyFile(filePath, dest);
+        await fs.unlink(filePath);
+      } else {
+        throw error;
+      }
+    }
+    movedTo = dest;
+
+    this.logEvent({
+      event: 'export.ameise',
+      message: 'Ameise import completed (automation)',
+      details: {
+        filePath,
+        movedTo,
+        template: settings.template,
+        stdout: fixMojibakeText(result.stdout || ''),
+        stderr: fixMojibakeText(result.stderr || '')
+      },
+      sessionId
+    });
+
+    return { success: true, movedTo, code: result.code || 0 };
   }
 
   logEvent({ level = 'info', event, message, details = null, sessionId = null }) {
@@ -206,6 +348,14 @@ class AutomationAgent {
         directProductCsv: true,
         onProgress: (data) => this.emitProgress({ ...data, scope: 'automation' })
       });
+      let ameiseResult = null;
+      try {
+        this.emitProgress({ scope: 'automation', percent: 85, message: 'Running Ameise import' });
+        ameiseResult = await this.runAmeiseImport(csvExportResult.filePath, sessionId);
+      } catch (error) {
+        // keep automation successful even if Ameise fails; error is logged
+        ameiseResult = { success: false, error: error.message };
+      }
 
       const now = new Date().toISOString();
       this.writeSetting('automation_last_run_at', now, 'string');
@@ -225,7 +375,8 @@ class AutomationAgent {
           sessionId,
           imported: importResult.inserted || 0,
           generated: generateResult.data?.generatedCount || 0,
-          csvExportPath: csvExportResult.filePath
+          csvExportPath: csvExportResult.filePath,
+          ameise: ameiseResult
         },
         sessionId
       });

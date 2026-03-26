@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('api', {
   exportCsv: (payload) => ipcRenderer.invoke('data:exportCsv', payload),
   importKnowledgeBase: (filePath) => ipcRenderer.invoke('data:importKnowledgeBase', { filePath }),
   getSettings: () => ipcRenderer.invoke('data:getSettings'),
+  getSyncStatus: () => ipcRenderer.invoke('data:getSyncStatus'),
   updateSetting: (payload) => ipcRenderer.invoke('data:updateSetting', payload),
   getStats: () => ipcRenderer.invoke('data:getStats'),
   getDashboardStats: () => ipcRenderer.invoke('data:getDashboardStats'),

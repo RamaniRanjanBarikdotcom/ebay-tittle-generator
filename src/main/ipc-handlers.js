@@ -290,6 +290,58 @@ export function registerIpcHandlers(mainWindow) {
     }
   };
 
+  const hydrateRemoteSettings = async (keys = []) => {
+    if (!isPrimaryMysqlActive()) return false;
+    const profile = AppSqlStore.getActiveProfile();
+    if (!profile) return false;
+    const db = DatabaseManager.getDatabase();
+    try {
+      const rows = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
+        if (dialect === 'mysql') {
+          if (keys.length) {
+            const placeholders = keys.map(() => '?').join(',');
+            const [remote] = await conn.query(
+              `SELECT setting_key AS \`key\`, setting_value AS \`value\`, value_type
+               FROM app_settings WHERE setting_key IN (${placeholders})`,
+              keys
+            );
+            return remote || [];
+          }
+          const [remote] = await conn.query(
+            'SELECT setting_key AS `key`, setting_value AS `value`, value_type FROM app_settings'
+          );
+          return remote || [];
+        }
+        if (keys.length) {
+          const list = keys.map((k) => `'${k.replace(/'/g, "''")}'`).join(',');
+          const result = await pool.request().query(
+            `SELECT [key] AS [key], [value] AS [value], value_type
+             FROM dbo.app_settings WHERE [key] IN (${list})`
+          );
+          return result.recordset || [];
+        }
+        const result = await pool.request().query(
+          'SELECT [key] AS [key], [value] AS [value], value_type FROM dbo.app_settings'
+        );
+        return result.recordset || [];
+      });
+      const upsert = db.prepare(
+        `INSERT INTO app_settings (key, value, value_type)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, value_type = excluded.value_type`
+      );
+      rows.forEach((row) => {
+        upsert.run(row.key || '', row.value ?? null, row.value_type || 'string');
+      });
+      const master = getSettingValue(db, 'app_master_key_plain', '');
+      if (master) process.env.ETG_MASTER_KEY = master;
+      return true;
+    } catch (error) {
+      console.error('[AppSqlSync] hydrate settings failed:', error.message);
+      return false;
+    }
+  };
+
   const getAmeiseSettings = (db) => ({
     enabled: getSettingValue(db, 'ameise_enabled', 'false') === 'true',
     exePath: getSettingValue(db, 'ameise_exe_path', ''),
@@ -322,6 +374,7 @@ export function registerIpcHandlers(mainWindow) {
 
   const runAmeiseImport = async ({ filePath, sessionId }) => {
     const db = DatabaseManager.getDatabase();
+    const effectiveSessionId = sessionId || resolveSessionId(db) || null;
     const settings = getAmeiseSettings(db);
     if (!settings.enabled) return { skipped: true, reason: 'disabled' };
 
@@ -373,7 +426,7 @@ export function registerIpcHandlers(mainWindow) {
       event: 'export.ameise',
       message: 'Ameise import started',
       details: { filePath, template: settings.template },
-      sessionId
+      sessionId: effectiveSessionId
     });
 
     let result;
@@ -430,7 +483,7 @@ export function registerIpcHandlers(mainWindow) {
           stderr: trimLogText(error.stderr),
           stdout: trimLogText(error.stdout)
         },
-        sessionId
+        sessionId: effectiveSessionId
       });
       updateAmeiseState({
         running: false,
@@ -439,6 +492,7 @@ export function registerIpcHandlers(mainWindow) {
         message: error.message || 'Ameise import failed'
       });
       ameiseChild = null;
+      if (effectiveSessionId) queueSessionSync(effectiveSessionId);
       throw error;
     }
 
@@ -470,7 +524,7 @@ export function registerIpcHandlers(mainWindow) {
         stdout: trimLogText(result.stdout),
         stderr: trimLogText(result.stderr)
       },
-      sessionId
+      sessionId: effectiveSessionId
     });
     updateAmeiseState({
       running: false,
@@ -481,6 +535,7 @@ export function registerIpcHandlers(mainWindow) {
     });
     ameiseChild = null;
 
+    if (effectiveSessionId) queueSessionSync(effectiveSessionId);
     return { success: true, movedTo, code: result.code || 0 };
   };
 
@@ -543,10 +598,11 @@ export function registerIpcHandlers(mainWindow) {
   };
 
   const logEvent = (db, { level = 'info', event, message, details = null, sessionId = null }) => {
+    const effectiveSessionId = sessionId || resolveSessionId(db) || null;
     db.prepare(
       `INSERT INTO app_logs (level, event, message, details, session_id)
        VALUES (?, ?, ?, ?, ?)`
-    ).run(level, event, message, details ? JSON.stringify(details) : null, sessionId || null);
+    ).run(level, event, message, details ? JSON.stringify(details) : null, effectiveSessionId);
   };
 
   const getJtlDbProfilesState = (db) => {
@@ -594,6 +650,7 @@ export function registerIpcHandlers(mainWindow) {
   const dirtySessions = new Set();
   let sessionSyncInFlight = false;
   let sessionRetryTimer = null;
+  let lastSyncReport = { updatedAt: null, lastAction: '', error: null };
   const scheduleSessionRetry = () => {
     if (sessionRetryTimer) return;
     sessionRetryTimer = setTimeout(async () => {
@@ -611,9 +668,19 @@ export function registerIpcHandlers(mainWindow) {
           const result = await AppSqlStore.syncSession(sessionId);
           if (result?.synced) {
             dirtySessions.delete(sessionId);
+            lastSyncReport = {
+              updatedAt: new Date().toISOString(),
+              lastAction: `pushed session ${sessionId}`,
+              error: null
+            };
           }
         } catch (error) {
           console.error('[AppSqlSync] Failed:', error.message);
+          lastSyncReport = {
+            updatedAt: new Date().toISOString(),
+            lastAction: `push failed ${sessionId}`,
+            error: error.message
+          };
         }
       }
     } finally {
@@ -644,10 +711,22 @@ export function registerIpcHandlers(mainWindow) {
       const profile = AppSqlStore.getActiveProfile();
       if (!profile || !String(profile.server || '').trim()) return;
       const result = await AppSqlStore.syncSettings();
-      if (result?.synced) settingsDirty = false;
+      if (result?.synced) {
+        settingsDirty = false;
+        lastSyncReport = {
+          updatedAt: new Date().toISOString(),
+          lastAction: 'settings synced',
+          error: null
+        };
+      }
     } catch (error) {
       console.error('[AppSqlSync] settings sync failed:', error.message);
       settingsDirty = true;
+      lastSyncReport = {
+        updatedAt: new Date().toISOString(),
+        lastAction: 'settings sync failed',
+        error: error.message
+      };
       scheduleSettingsRetry();
     } finally {
       settingsSyncInFlight = false;
@@ -657,6 +736,7 @@ export function registerIpcHandlers(mainWindow) {
     settingsDirty = true;
     setTimeout(flushSettingsSync, 0);
   };
+  automationAgent.setSettingsSync(queueSettingsSync);
 
   // Push all local sessions to MySQL — used when a profile is first configured on a system with existing data
   const queueAllLocalSessionsSync = () => {
@@ -706,6 +786,11 @@ export function registerIpcHandlers(mainWindow) {
           const result = await AppSqlStore.restoreFromRemote({ ...options, force: true });
           if (result?.synced) {
             console.log('[AppSqlSync] Restored local data from App DB', result.counts || {});
+            lastSyncReport = {
+              updatedAt: new Date().toISOString(),
+              lastAction: 'restored from remote (forced)',
+              error: null
+            };
           }
           return result;
         }
@@ -725,6 +810,11 @@ export function registerIpcHandlers(mainWindow) {
           if (pushed) {
             console.log('[AppSqlSync] Remote empty; pushed local data to App DB');
           }
+          lastSyncReport = {
+            updatedAt: new Date().toISOString(),
+            lastAction: 'pushed local to remote (remote empty)',
+            error: null
+          };
           return { synced: true, direction: 'push_local', local: localState, remote: remoteState };
         }
 
@@ -732,6 +822,11 @@ export function registerIpcHandlers(mainWindow) {
           const result = await AppSqlStore.restoreFromRemote({ force: true });
           if (result?.synced) {
             console.log('[AppSqlSync] Restored local data from App DB', result.counts || {});
+            lastSyncReport = {
+              updatedAt: new Date().toISOString(),
+              lastAction: 'restored from remote (local empty)',
+              error: null
+            };
           }
           return result;
         }
@@ -755,6 +850,11 @@ export function registerIpcHandlers(mainWindow) {
           if (pushed) {
             console.log('[AppSqlSync] Local newer; pushed data to App DB');
           }
+          lastSyncReport = {
+            updatedAt: new Date().toISOString(),
+            lastAction: 'pushed local to remote (local newer)',
+            error: null
+          };
           return { synced: true, direction: 'push_local', local: localState, remote: remoteState };
         }
 
@@ -762,13 +862,28 @@ export function registerIpcHandlers(mainWindow) {
           const result = await AppSqlStore.restoreFromRemote({ force: true });
           if (result?.synced) {
             console.log('[AppSqlSync] Remote newer; restored local data from App DB', result.counts || {});
+            lastSyncReport = {
+              updatedAt: new Date().toISOString(),
+              lastAction: 'restored from remote (remote newer)',
+              error: null
+            };
           }
           return result;
         }
 
+        lastSyncReport = {
+          updatedAt: new Date().toISOString(),
+          lastAction: 'no changes (already in sync)',
+          error: null
+        };
         return { synced: true, direction: 'noop', local: localState, remote: remoteState };
       } catch (error) {
         console.error('[AppSqlSync] Restore failed:', error.message);
+        lastSyncReport = {
+          updatedAt: new Date().toISOString(),
+          lastAction: 'sync failed',
+          error: error.message
+        };
         return { synced: false, reason: error.message };
       } finally {
         remoteRestorePromise = null;
@@ -798,6 +913,35 @@ export function registerIpcHandlers(mainWindow) {
   }, 50);
 
   ipcMain.handle('app:ping', async () => 'pong');
+
+  ipcMain.handle('data:getSyncStatus', async () => {
+    try {
+      const db = DatabaseManager.getDatabase();
+      const local = AppSqlStore.getLocalSyncState();
+      const profile = AppSqlStore.getActiveProfile();
+      let remote = null;
+      if (profile && String(profile.server || '').trim()) {
+        try {
+          remote = await AppSqlStore.getRemoteSyncState(profile);
+        } catch (error) {
+          remote = { error: error.message };
+        }
+      }
+      return {
+        success: true,
+        data: {
+          local,
+          remote,
+          pendingSessions: dirtySessions.size,
+          settingsDirty,
+          lastSyncReport
+        },
+        error: null
+      };
+    } catch (error) {
+      return { success: false, data: null, error: error.message };
+    }
+  });
 
   ipcMain.handle('dialog:openExcel', async () => {
     const result = await dialog.showOpenDialog({
@@ -1066,6 +1210,7 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.handle('data:getSettings', async () => {
     try {
       const db = DatabaseManager.getDatabase();
+      await hydrateRemoteSettings();
       const rows = db.prepare('SELECT key, value, value_type FROM app_settings').all();
       const settings = {};
       rows.forEach((row) => {
@@ -1101,6 +1246,7 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.handle('db:getProfiles', async () => {
     try {
       const db = DatabaseManager.getDatabase();
+      await hydrateRemoteSettings(['jtl_db_profiles', 'active_jtl_db_profile_id', 'db_profiles', 'active_db_profile_id', 'app_master_key_plain']);
       const { profiles, activeProfileId } = getJtlDbProfilesState(db);
       return { success: true, data: { profiles, activeProfileId }, error: null };
     } catch (error) {
@@ -1140,6 +1286,11 @@ export function registerIpcHandlers(mainWindow) {
       persistJtlProfilesState(db, profiles, nextActive);
       sqlAgent.refreshNow().catch(() => {});
       queueSettingsSync();
+      setTimeout(() => {
+        try {
+          flushSettingsSync();
+        } catch {}
+      }, 0);
       return { success: true, data: { id: nextProfile.id, profiles, activeProfileId: nextActive }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1156,6 +1307,11 @@ export function registerIpcHandlers(mainWindow) {
       persistJtlProfilesState(db, nextProfiles, nextActive);
       sqlAgent.refreshNow().catch(() => {});
       queueSettingsSync();
+      setTimeout(() => {
+        try {
+          flushSettingsSync();
+        } catch {}
+      }, 0);
       return { success: true, data: { profiles: nextProfiles, activeProfileId: nextActive }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1169,6 +1325,11 @@ export function registerIpcHandlers(mainWindow) {
       persistJtlProfilesState(db, profiles, payload?.id || '');
       sqlAgent.refreshNow().catch(() => {});
       queueSettingsSync();
+      setTimeout(() => {
+        try {
+          flushSettingsSync();
+        } catch {}
+      }, 0);
       return { success: true, data: { activeProfileId: payload?.id || '' }, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1231,6 +1392,8 @@ export function registerIpcHandlers(mainWindow) {
       setSettingValue(db, 'app_db_profiles', JSON.stringify(nextProfiles), 'string');
       const nextActive = payload?.setActive ? id : state.activeProfileId || id;
       setSettingValue(db, 'active_app_db_profile_id', nextActive, 'string');
+      // Force online DB as primary when an App DB profile exists
+      setSettingValue(db, 'app_db_primary', 'mysql', 'string');
       queueSettingsSync();
       if (nextActive) {
         // Prefer remote as source-of-truth when App DB is active
@@ -1287,6 +1450,9 @@ export function registerIpcHandlers(mainWindow) {
     try {
       const db = DatabaseManager.getDatabase();
       setSettingValue(db, 'active_app_db_profile_id', payload?.id || '', 'string');
+      if (payload?.id) {
+        setSettingValue(db, 'app_db_primary', 'mysql', 'string');
+      }
       queueSettingsSync();
       if (payload?.id) {
         queueRemoteRestore({ force: true }).catch(() => {});
@@ -1521,16 +1687,54 @@ export function registerIpcHandlers(mainWindow) {
       const result = await AppSqlStore.withClient(profile, async ({ dialect, conn, pool }) => {
         if (dialect === 'mysql') {
           const [[{ total }]] = await conn.query(`SELECT COUNT(*) as total FROM \`${safeTable}\``);
-          const [rows] = await conn.query(`SELECT * FROM \`${safeTable}\` ORDER BY id DESC LIMIT ? OFFSET ?`, [pageSize, offset]);
+          let rows = [];
+          try {
+            [rows] = await conn.query(
+              `SELECT * FROM \`${safeTable}\` ORDER BY id DESC LIMIT ? OFFSET ?`,
+              [pageSize, offset]
+            );
+          } catch (error) {
+            if (/Unknown column 'id' in 'ORDER BY'/i.test(String(error?.message || ''))) {
+              if (safeTable === 'app_settings') {
+                [rows] = await conn.query(
+                  `SELECT * FROM \`${safeTable}\` ORDER BY updated_at DESC, setting_key ASC LIMIT ? OFFSET ?`,
+                  [pageSize, offset]
+                );
+              } else {
+                [rows] = await conn.query(`SELECT * FROM \`${safeTable}\` LIMIT ? OFFSET ?`, [pageSize, offset]);
+              }
+            } else {
+              throw error;
+            }
+          }
           const cols = rows.length ? Object.keys(rows[0]) : [];
           return { rows, total: Number(total), columns: cols };
         } else {
           const countRes = await pool.request().query(`SELECT COUNT(*) as total FROM [${safeTable}]`);
           const total = Number(countRes.recordset[0]?.total) || 0;
-          const dataRes = await pool.request().query(
-            `SELECT * FROM [${safeTable}] ORDER BY id DESC OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`
-          );
-          const rows = dataRes.recordset || [];
+          let rows = [];
+          try {
+            const dataRes = await pool.request().query(
+              `SELECT * FROM [${safeTable}] ORDER BY id DESC OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`
+            );
+            rows = dataRes.recordset || [];
+          } catch (error) {
+            if (/Invalid column name 'id'/i.test(String(error?.message || ''))) {
+              if (safeTable === 'app_settings') {
+                const dataRes = await pool.request().query(
+                  `SELECT * FROM [${safeTable}] ORDER BY updated_at DESC, [key] ASC OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`
+                );
+                rows = dataRes.recordset || [];
+              } else {
+                const dataRes = await pool.request().query(
+                  `SELECT * FROM [${safeTable}] OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`
+                );
+                rows = dataRes.recordset || [];
+              }
+            } else {
+              throw error;
+            }
+          }
           const cols = rows.length ? Object.keys(rows[0]) : [];
           return { rows, total, columns: cols };
         }
@@ -1601,6 +1805,7 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.handle('automation:setMode', async (_event, payload) => {
     try {
       const status = await automationAgent.setMode(payload?.mode);
+      await flushSettingsSync();
       return { success: true, data: status, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1610,6 +1815,7 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.handle('automation:setIntervalDays', async (_event, payload) => {
     try {
       const status = await automationAgent.setIntervalDays(payload?.intervalDays);
+      await flushSettingsSync();
       return { success: true, data: status, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };
@@ -1622,6 +1828,7 @@ export function registerIpcHandlers(mainWindow) {
         every: payload?.every,
         unit: payload?.unit
       });
+      await flushSettingsSync();
       return { success: true, data: status, error: null };
     } catch (error) {
       return { success: false, data: null, error: error.message };

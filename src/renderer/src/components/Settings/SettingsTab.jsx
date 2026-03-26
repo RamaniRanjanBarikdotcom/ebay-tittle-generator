@@ -91,9 +91,32 @@ ORDER BY
   const [automationStatus, setAutomationStatus] = useState(null);
   const [automationUpdating, setAutomationUpdating] = useState(false);
   const [automationRunningNow, setAutomationRunningNow] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [syncStatusLoading, setSyncStatusLoading] = useState(false);
 
   useEffect(() => {
     loadSettings();
+  }, []);
+
+  useEffect(() => {
+    let timer;
+    const loadSyncStatus = async () => {
+      if (!window.api?.getSyncStatus) return;
+      setSyncStatusLoading(true);
+      try {
+        const result = await window.api.getSyncStatus();
+        if (result?.success) setSyncStatus(result.data || null);
+      } catch {
+        // ignore
+      } finally {
+        setSyncStatusLoading(false);
+      }
+    };
+    loadSyncStatus().catch(() => {});
+    timer = setInterval(loadSyncStatus, 5000);
+    return () => {
+      if (timer) clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -1004,6 +1027,41 @@ ORDER BY
 
                 <Card title="App SQL Database (CRUD + Storage)" variant="outlined">
                   <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <div className="empty-state" style={{ marginBottom: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Sync status</div>
+                          <div className="panel-subtext">
+                            {syncStatus?.lastSyncReport?.lastAction || 'No sync yet'}
+                          </div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 600 }}>
+                            {syncStatusLoading ? 'Checking...' : 'Online sync'}
+                          </div>
+                          <div className="panel-subtext">
+                            {syncStatus?.lastSyncReport?.updatedAt
+                              ? new Date(syncStatus.lastSyncReport.updatedAt).toLocaleString()
+                              : '-'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="panel-subtext" style={{ marginTop: 8 }}>
+                        Pending sessions: {syncStatus?.pendingSessions ?? 0} | Settings dirty:{' '}
+                        {syncStatus?.settingsDirty ? 'yes' : 'no'}
+                      </div>
+                      <div className="panel-subtext">
+                        Local rows: {syncStatus?.local?.counts?.products ?? 0} products /{' '}
+                        {syncStatus?.local?.counts?.titles ?? 0} titles /{' '}
+                        {syncStatus?.local?.counts?.history ?? 0} history
+                      </div>
+                      <div className="panel-subtext">
+                        Remote rows: {syncStatus?.remote?.counts?.products ?? 0} products /{' '}
+                        {syncStatus?.remote?.counts?.titles ?? 0} titles /{' '}
+                        {syncStatus?.remote?.counts?.history ?? 0} history
+                        {syncStatus?.remote?.error ? ` (error: ${syncStatus.remote.error})` : ''}
+                      </div>
+                    </div>
                     <div className="grid-two">
                       <div>
                         <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>
