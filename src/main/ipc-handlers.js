@@ -333,8 +333,7 @@ export function registerIpcHandlers(mainWindow) {
       rows.forEach((row) => {
         upsert.run(row.key || '', row.value ?? null, row.value_type || 'string');
       });
-      const master = getSettingValue(db, 'app_master_key_plain', '');
-      if (master) process.env.ETG_MASTER_KEY = master;
+      ensureMasterKey();
       return true;
     } catch (error) {
       console.error('[AppSqlSync] hydrate settings failed:', error.message);
@@ -1246,7 +1245,14 @@ export function registerIpcHandlers(mainWindow) {
   ipcMain.handle('db:getProfiles', async () => {
     try {
       const db = DatabaseManager.getDatabase();
-      await hydrateRemoteSettings(['jtl_db_profiles', 'active_jtl_db_profile_id', 'db_profiles', 'active_db_profile_id', 'app_master_key_plain']);
+      await hydrateRemoteSettings([
+        'jtl_db_profiles',
+        'active_jtl_db_profile_id',
+        'db_profiles',
+        'active_db_profile_id',
+        'app_master_key_plain',
+        'app_master_key'
+      ]);
       const { profiles, activeProfileId } = getJtlDbProfilesState(db);
       return { success: true, data: { profiles, activeProfileId }, error: null };
     } catch (error) {

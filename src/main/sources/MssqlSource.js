@@ -110,6 +110,13 @@ function parseFlexibleNumber(input) {
   return Number.isFinite(value) ? value : NaN;
 }
 
+function normalizeTitleSnapshot(title) {
+  return String(title || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 function mapRowToProduct(row, sessionId, pricingResolver) {
   const itemNumber = String(
     firstNonEmpty(row, [
@@ -177,7 +184,7 @@ function mapRowToProduct(row, sessionId, pricingResolver) {
   ]);
   const quantity = quantityRaw === '' ? null : Number(quantityRaw);
   const pricing = pricingResolver
-    ? pricingResolver({ priceRaw, soldCountRaw, itemNumber, sku })
+    ? pricingResolver({ priceRaw, soldCountRaw, itemNumber, sku, originalTitle })
     : calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment: '' });
   let rawQueryData = null;
   try {
@@ -369,37 +376,94 @@ ORDER BY
       let skippedSoldNotZero = 0;
       let skippedNonPrinter = 0;
       const db = DatabaseManager.getDatabase();
-      const getImportCount = db.prepare(
-        'SELECT import_count FROM sku_import_counts WHERE sku = ? AND item_number = ? LIMIT 1'
+      const getLastHistory = db.prepare(
+        `SELECT price_before, price_after, title_snapshot
+         FROM price_history
+         WHERE sku = ? AND item_number = ?
+         ORDER BY recorded_at DESC, id DESC
+         LIMIT 1`
       );
-      const bumpImportCount = db.prepare(
-        `INSERT INTO sku_import_counts (sku, item_number, import_count, last_imported_at)
-         VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-         ON CONFLICT(sku, item_number) DO UPDATE SET
-           import_count = import_count + 1,
-           last_imported_at = CURRENT_TIMESTAMP`
+      const getNextImportNumber = db.prepare(
+        `SELECT COALESCE(MAX(import_number), 0) + 1 AS next_num
+         FROM price_history
+         WHERE sku = ? AND item_number = ?`
       );
-      const resolvePricing = ({ priceRaw, soldCountRaw, itemNumber, sku }) => {
+      const insertPriceHistory = db.prepare(
+        `INSERT INTO price_history (
+          sku, item_number, import_number, price_before, price_after,
+          price_action, sold_qty, reason, title_snapshot, session_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const historyEntries = [];
+      const resolvePricing = ({ priceRaw, soldCountRaw, itemNumber, sku, originalTitle }) => {
         const price = parseFlexibleNumber(priceRaw);
         const soldCount = parseFlexibleNumber(soldCountRaw);
         if (!Number.isFinite(price)) {
           return calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment: '' });
         }
+
+        const normalizedTitle = normalizeTitleSnapshot(originalTitle);
         if (Number.isFinite(soldCount) && soldCount === 0) {
-          const current = getImportCount.get(sku, itemNumber)?.import_count || 0;
-          const nextCount = current + 1;
-          const action = nextCount % 2 !== 0 ? 'decrease' : 'increase';
-          const delta = action === 'decrease' ? -0.02 : 0.02;
-          const suggestedPrice = Math.max(0, Number((price + delta).toFixed(2)));
+          const last = getLastHistory.get(sku, itemNumber);
+          const lastNew = parseFlexibleNumber(last?.price_after);
+          const lastOld = parseFlexibleNumber(last?.price_before);
+          const lastTitle = normalizeTitleSnapshot(last?.title_snapshot);
+          const titleChanged = lastTitle && normalizedTitle && lastTitle !== normalizedTitle;
+          const priceMatchesLastNew =
+            Number.isFinite(lastNew) && Math.abs(price - lastNew) < 0.0001;
+
+          let suggestedPrice = price;
+          let priceAction = 'unchanged';
+          let reason = '';
+          let record = false;
+
+          if (!last || titleChanged || !priceMatchesLastNew) {
+            suggestedPrice = Math.max(0, Number((price - 0.02).toFixed(2)));
+            priceAction = 'decrease';
+            reason = !last
+              ? 'first zero-sales decrease'
+              : titleChanged
+              ? 'title changed; reset decrease'
+              : `price mismatch (${price} != ${Number.isFinite(lastNew) ? lastNew : 'n/a'}); reset decrease`;
+            record = suggestedPrice !== price;
+          } else if (Number.isFinite(lastOld)) {
+            suggestedPrice = Number(lastOld.toFixed(2));
+            priceAction = 'swap';
+            reason = 'swap old/new (zero sales)';
+            record = suggestedPrice !== price;
+          } else {
+            suggestedPrice = Math.max(0, Number((price - 0.02).toFixed(2)));
+            priceAction = 'decrease';
+            reason = 'missing prior old price; decrease';
+            record = suggestedPrice !== price;
+          }
+
+          const adjustment =
+            priceAction === 'decrease'
+              ? 'decrease-0-sold'
+              : priceAction === 'swap'
+              ? 'swap-0-sold'
+              : 'unchanged';
+
           return {
             price,
             soldCount,
             suggestedPrice,
-            adjustment: action === 'decrease' ? 'decrease-0-sold' : 'increase-0-sold-repeat',
+            adjustment,
             updateStatus: suggestedPrice !== price ? 'pending' : 'not-required',
-            _bump: true
+            __history: record
+              ? {
+                  priceBefore: price,
+                  priceAfter: suggestedPrice,
+                  priceAction,
+                  soldQty: soldCount,
+                  reason,
+                  titleSnapshot: normalizedTitle
+                }
+              : null
           };
         }
+
         return {
           price,
           soldCount: Number.isFinite(soldCount) ? soldCount : null,
@@ -414,6 +478,8 @@ ORDER BY
           errors.push({ row: index + 1, error: 'Missing required fields: item_number, sku, original_title' });
           return;
         }
+        const history = product.__history;
+        delete product.__history;
         if (!isPrinterConsumable(product.original_title)) {
           skippedNonPrinter += 1;
           return;
@@ -422,16 +488,36 @@ ORDER BY
           skippedSoldNotZero += 1;
           return;
         }
-        const adj = product.price_adjustment || '';
-        if (adj.startsWith('decrease-0-sold') || adj.startsWith('increase-0-sold')) {
-          bumpImportCount.run(product.sku, product.item_number);
-        }
         mapped.push(product);
+        if (history) {
+          historyEntries.push({
+            sku: product.sku,
+            item_number: product.item_number,
+            ...history
+          });
+        }
       });
 
       const insertResult = Product.createManyIgnore(mapped);
       if (!insertResult.success) {
         throw new Error(insertResult.error || 'Database import failed');
+      }
+      if (historyEntries.length) {
+        for (const entry of historyEntries) {
+          const nextNum = getNextImportNumber.get(entry.sku, entry.item_number)?.next_num ?? 1;
+          insertPriceHistory.run(
+            entry.sku,
+            entry.item_number,
+            nextNum,
+            entry.priceBefore,
+            entry.priceAfter,
+            entry.priceAction,
+            entry.soldQty ?? null,
+            entry.reason || null,
+            entry.titleSnapshot || null,
+            sessionId || null
+          );
+        }
       }
 
       return {
@@ -523,37 +609,94 @@ ORDER BY
       let skippedSoldNotZero = 0;
       let skippedNonPrinter = 0;
       const db = DatabaseManager.getDatabase();
-      const getImportCount = db.prepare(
-        'SELECT import_count FROM sku_import_counts WHERE sku = ? AND item_number = ? LIMIT 1'
+      const getLastHistory = db.prepare(
+        `SELECT price_before, price_after, title_snapshot
+         FROM price_history
+         WHERE sku = ? AND item_number = ?
+         ORDER BY recorded_at DESC, id DESC
+         LIMIT 1`
       );
-      const bumpImportCount = db.prepare(
-        `INSERT INTO sku_import_counts (sku, item_number, import_count, last_imported_at)
-         VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-         ON CONFLICT(sku, item_number) DO UPDATE SET
-           import_count = import_count + 1,
-           last_imported_at = CURRENT_TIMESTAMP`
+      const getNextImportNumber = db.prepare(
+        `SELECT COALESCE(MAX(import_number), 0) + 1 AS next_num
+         FROM price_history
+         WHERE sku = ? AND item_number = ?`
       );
-      const resolvePricing = ({ priceRaw, soldCountRaw, itemNumber, sku }) => {
+      const insertPriceHistory = db.prepare(
+        `INSERT INTO price_history (
+          sku, item_number, import_number, price_before, price_after,
+          price_action, sold_qty, reason, title_snapshot, session_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const historyEntries = [];
+      const resolvePricing = ({ priceRaw, soldCountRaw, itemNumber, sku, originalTitle }) => {
         const price = parseFlexibleNumber(priceRaw);
         const soldCount = parseFlexibleNumber(soldCountRaw);
         if (!Number.isFinite(price)) {
           return calculatePriceAdjustment(priceRaw, soldCountRaw, { previousAdjustment: '' });
         }
+
+        const normalizedTitle = normalizeTitleSnapshot(originalTitle);
         if (Number.isFinite(soldCount) && soldCount === 0) {
-          const current = getImportCount.get(sku, itemNumber)?.import_count || 0;
-          const nextCount = current + 1;
-          const action = nextCount % 2 !== 0 ? 'decrease' : 'increase';
-          const delta = action === 'decrease' ? -0.02 : 0.02;
-          const suggestedPrice = Math.max(0, Number((price + delta).toFixed(2)));
+          const last = getLastHistory.get(sku, itemNumber);
+          const lastNew = parseFlexibleNumber(last?.price_after);
+          const lastOld = parseFlexibleNumber(last?.price_before);
+          const lastTitle = normalizeTitleSnapshot(last?.title_snapshot);
+          const titleChanged = lastTitle && normalizedTitle && lastTitle !== normalizedTitle;
+          const priceMatchesLastNew =
+            Number.isFinite(lastNew) && Math.abs(price - lastNew) < 0.0001;
+
+          let suggestedPrice = price;
+          let priceAction = 'unchanged';
+          let reason = '';
+          let record = false;
+
+          if (!last || titleChanged || !priceMatchesLastNew) {
+            suggestedPrice = Math.max(0, Number((price - 0.02).toFixed(2)));
+            priceAction = 'decrease';
+            reason = !last
+              ? 'first zero-sales decrease'
+              : titleChanged
+              ? 'title changed; reset decrease'
+              : `price mismatch (${price} != ${Number.isFinite(lastNew) ? lastNew : 'n/a'}); reset decrease`;
+            record = suggestedPrice !== price;
+          } else if (Number.isFinite(lastOld)) {
+            suggestedPrice = Number(lastOld.toFixed(2));
+            priceAction = 'swap';
+            reason = 'swap old/new (zero sales)';
+            record = suggestedPrice !== price;
+          } else {
+            suggestedPrice = Math.max(0, Number((price - 0.02).toFixed(2)));
+            priceAction = 'decrease';
+            reason = 'missing prior old price; decrease';
+            record = suggestedPrice !== price;
+          }
+
+          const adjustment =
+            priceAction === 'decrease'
+              ? 'decrease-0-sold'
+              : priceAction === 'swap'
+              ? 'swap-0-sold'
+              : 'unchanged';
+
           return {
             price,
             soldCount,
             suggestedPrice,
-            adjustment: action === 'decrease' ? 'decrease-0-sold' : 'increase-0-sold-repeat',
+            adjustment,
             updateStatus: suggestedPrice !== price ? 'pending' : 'not-required',
-            _bump: true
+            __history: record
+              ? {
+                  priceBefore: price,
+                  priceAfter: suggestedPrice,
+                  priceAction,
+                  soldQty: soldCount,
+                  reason,
+                  titleSnapshot: normalizedTitle
+                }
+              : null
           };
         }
+
         return {
           price,
           soldCount: Number.isFinite(soldCount) ? soldCount : null,
@@ -568,6 +711,8 @@ ORDER BY
           errors.push({ row: index + 1, error: 'Missing required fields: item_number, sku, original_title' });
           return;
         }
+        const history = product.__history;
+        delete product.__history;
         if (!isPrinterConsumable(product.original_title)) {
           skippedNonPrinter += 1;
           return;
@@ -576,16 +721,36 @@ ORDER BY
           skippedSoldNotZero += 1;
           return;
         }
-        const adj = product.price_adjustment || '';
-        if (adj.startsWith('decrease-0-sold') || adj.startsWith('increase-0-sold')) {
-          bumpImportCount.run(product.sku, product.item_number);
-        }
         mapped.push(product);
+        if (history) {
+          historyEntries.push({
+            sku: product.sku,
+            item_number: product.item_number,
+            ...history
+          });
+        }
       });
 
       const insertResult = Product.createManyIgnore(mapped);
       if (!insertResult.success) {
         throw new Error(insertResult.error || 'Database import failed');
+      }
+      if (historyEntries.length) {
+        for (const entry of historyEntries) {
+          const nextNum = getNextImportNumber.get(entry.sku, entry.item_number)?.next_num ?? 1;
+          insertPriceHistory.run(
+            entry.sku,
+            entry.item_number,
+            nextNum,
+            entry.priceBefore,
+            entry.priceAfter,
+            entry.priceAction,
+            entry.soldQty ?? null,
+            entry.reason || null,
+            entry.titleSnapshot || null,
+            sessionId || null
+          );
+        }
       }
 
       return {

@@ -281,8 +281,8 @@ export default class PipelineRunner {
 
     // price_history audit
     const insertPriceHistory = db.prepare(
-      `INSERT INTO price_history (sku, item_number, import_number, price_before, price_after, price_action, sold_qty, reason, session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO price_history (sku, item_number, import_number, price_before, price_after, price_action, sold_qty, reason, title_snapshot, session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     // ── Transaction ────────────────────────────────────────────────────────
@@ -437,11 +437,18 @@ export default class PipelineRunner {
           });
         }
 
-        // ── 3. Price adjustment (import_count based) ──────────────────────
+        // ── 3. Price adjustment (skip if already computed at import) ─────────
         const sku = product.sku || '';
         const itemNumber = product.item_number || '';
+        const hasPricing =
+          product.suggested_price !== null &&
+          product.suggested_price !== undefined &&
+          product.price_adjustment !== null &&
+          product.price_adjustment !== undefined &&
+          product.price_update_status !== null &&
+          product.price_update_status !== undefined;
 
-        if (sku && itemNumber) {
+        if (!hasPricing && sku && itemNumber) {
           upsertImportCount.run(sku, itemNumber);
           const countRow = getImportCount.get(sku, itemNumber);
           const importCount = countRow?.import_count ?? 1;
@@ -473,6 +480,7 @@ export default class PipelineRunner {
               price, suggestedPrice, priceAction,
               soldQty,
               `sold_qty=${soldQty}, import #${importCount} (${importCount % 2 !== 0 ? 'odd' : 'even'}) → ${priceAction}`,
+              product.original_title || null,
               sessionId || null
             );
           }

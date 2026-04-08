@@ -89,6 +89,7 @@ class DatabaseManager {
       this.ensureColumn('products', 'suggested_price', 'REAL');
       this.ensureColumn('products', 'price_adjustment', 'TEXT');
       this.ensureColumn('products', 'price_update_status', 'TEXT');
+      this.ensureColumn('price_history', 'title_snapshot', 'TEXT');
       this.ensureColumn('generated_titles', 'session_id', 'TEXT');
       this.ensureColumn('generated_titles', 'marketplace', 'TEXT');
       this.ensureColumn('generated_titles', 'sku', 'TEXT');

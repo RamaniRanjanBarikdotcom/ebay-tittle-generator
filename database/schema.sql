@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS price_history (
   price_action TEXT,
   sold_qty REAL,
   reason TEXT,
+  title_snapshot TEXT,
   session_id TEXT,
   recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

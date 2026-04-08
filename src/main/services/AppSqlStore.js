@@ -435,6 +435,7 @@ export default class AppSqlStore {
             price_action VARCHAR(50) NULL,
             sold_qty DECIMAL(18,2) NULL,
             reason LONGTEXT NULL,
+            title_snapshot LONGTEXT NULL,
             session_id VARCHAR(64) NULL,
             recorded_at DATETIME NULL,
             INDEX ix_app_price_history_sku (sku)
@@ -449,6 +450,7 @@ export default class AppSqlStore {
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS marketplace VARCHAR(50) NULL;
           ALTER TABLE app_generated_titles ADD COLUMN IF NOT EXISTS last_used_at DATETIME NULL;
           ALTER TABLE app_title_knowledge_base ADD COLUMN IF NOT EXISTS item_number VARCHAR(255) NULL;
+          ALTER TABLE app_price_history ADD COLUMN IF NOT EXISTS title_snapshot LONGTEXT NULL;
         `);
         return true;
       }
@@ -653,10 +655,15 @@ export default class AppSqlStore {
             price_action NVARCHAR(50) NULL,
             sold_qty DECIMAL(18,2) NULL,
             reason NVARCHAR(MAX) NULL,
+            title_snapshot NVARCHAR(MAX) NULL,
             session_id NVARCHAR(64) NULL,
             recorded_at DATETIME2 NULL
           );
           CREATE INDEX IX_app_price_history_sku ON dbo.app_price_history(sku);
+        END;
+        IF COL_LENGTH('dbo.app_price_history', 'title_snapshot') IS NULL
+        BEGIN
+          ALTER TABLE dbo.app_price_history ADD title_snapshot NVARCHAR(MAX) NULL;
         END;
         IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_app_logs_created_at' AND object_id = OBJECT_ID('dbo.app_logs'))
         BEGIN
@@ -1144,8 +1151,8 @@ export default class AppSqlStore {
         ? localDb.prepare(
             `INSERT OR REPLACE INTO price_history (
               id, sku, item_number, import_number, price_before, price_after,
-              price_action, sold_qty, reason, session_id, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              price_action, sold_qty, reason, title_snapshot, session_id, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
         : null;
 
@@ -1349,6 +1356,7 @@ export default class AppSqlStore {
             row.price_action || null,
             row.sold_qty ?? null,
             row.reason || null,
+            row.title_snapshot || null,
             row.session_id || null,
             normalizeTimestampValue(row.recorded_at)
           );
@@ -1618,12 +1626,13 @@ export default class AppSqlStore {
             await conn.query(
               `INSERT INTO app_price_history (
                 local_id, sku, item_number, import_number, price_before, price_after,
-                price_action, sold_qty, reason, session_id, recorded_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                price_action, sold_qty, reason, title_snapshot, session_id, recorded_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 row.id ?? null, row.sku || null, row.item_number || null, row.import_number ?? null,
                 row.price_before ?? null, row.price_after ?? null, row.price_action || null,
-                row.sold_qty ?? null, row.reason || null, row.session_id || null, toDate(row.recorded_at)
+                row.sold_qty ?? null, row.reason || null, row.title_snapshot || null,
+                row.session_id || null, toDate(row.recorded_at)
               ]
             );
           }
@@ -1909,15 +1918,16 @@ export default class AppSqlStore {
           r.input('price_action', mssql.NVarChar(50), row.price_action || null);
           r.input('sold_qty', mssql.Decimal(18, 2), row.sold_qty ?? null);
           r.input('reason', mssql.NVarChar(mssql.MAX), row.reason || null);
+          r.input('title_snapshot', mssql.NVarChar(mssql.MAX), row.title_snapshot || null);
           r.input('session_id', mssql.NVarChar(64), row.session_id || null);
           r.input('recorded_at', mssql.DateTime2, toDate(row.recorded_at));
           await r.query(`
             INSERT INTO dbo.app_price_history (
               local_id, sku, item_number, import_number, price_before, price_after,
-              price_action, sold_qty, reason, session_id, recorded_at
+              price_action, sold_qty, reason, title_snapshot, session_id, recorded_at
             ) VALUES (
               @local_id, @sku, @item_number, @import_number, @price_before, @price_after,
-              @price_action, @sold_qty, @reason, @session_id, @recorded_at
+              @price_action, @sold_qty, @reason, @title_snapshot, @session_id, @recorded_at
             )
           `);
         }
